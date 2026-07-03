@@ -81,12 +81,12 @@ type InstallResult struct {
 
 // BackendCheckResult holds the structured output of a backend health check.
 type BackendCheckResult struct {
-	Status     string      `json:"status"` // "ok" or "fail"
-	Version    string      `json:"version,omitempty"`
-	Timestamp  int64       `json:"timestamp"`
-	Items      []CheckItem `json:"items"`
-	PassedCount int        `json:"passed_count"`
-	TotalCount  int        `json:"total_count"`
+	Status      string      `json:"status"` // "ok" or "fail"
+	Version     string      `json:"version,omitempty"`
+	Timestamp   int64       `json:"timestamp"`
+	Items       []CheckItem `json:"items"`
+	PassedCount int         `json:"passed_count"`
+	TotalCount  int         `json:"total_count"`
 }
 
 // CheckItem represents a single check result.
@@ -140,10 +140,23 @@ func (p *Probe) Status() Status {
 }
 
 func (p *Probe) PythonCommand() string {
+	// Try to get uv-managed Python first (portable, no system dependencies)
+	uv := p.UvCommand()
+	out, err := p.run(context.Background(), uv, "python", "find", "3.12")
+	if err == nil {
+		path := strings.TrimSpace(string(out))
+		if path != "" {
+			return path
+		}
+	}
+	
+	// Fallback: check if venv Python exists
 	venvPython := p.venvPython()
 	if _, err := os.Stat(venvPython); err == nil {
 		return venvPython
 	}
+	
+	// Last resort: system Python (requires installation)
 	for _, candidate := range []string{"python3.13", "python3.12", "python3", "python"} {
 		if _, err := p.lookPath(candidate); err == nil {
 			return candidate
@@ -171,6 +184,8 @@ func (p *Probe) InstallPlan(repoRoot string, modelIDs ...string) InstallPlan {
 	for _, model := range p.ModelChoices(modelIDs) {
 		modelFiles = append(modelFiles, model.Destination)
 	}
+
+	venvPath := filepath.Join(p.rootDir, "venv")
 	pythonVersion := p.bestAvailablePythonVersion()
 	return InstallPlan{
 		RootDir:      p.rootDir,
@@ -180,34 +195,30 @@ func (p *Probe) InstallPlan(repoRoot string, modelIDs ...string) InstallPlan {
 		ModelsDir:    filepath.Join(repoRoot, "models"),
 		Models:       modelFiles,
 		Commands: [][]string{
-			{uv, "venv", "--python", pythonVersion, "--clear", filepath.Join(p.rootDir, "venv")},
-			{uv, "pip", "install", "--python", python, "--index-strategy", "unsafe-best-match", "-r", requirements},
+			{uv, "venv", "--python", pythonVersion, venvPath},
+			{uv, "pip", "install", "--python", python, "--index-strategy", "unsafe-best-match", "--force-reinstall", "-r", requirements},
 		},
 	}
 }
 
-// bestAvailablePythonVersion returns the highest available Python version string (e.g. "3.13", "3.12").
-// Prefers newer versions; falls back gracefully if a specific version isn't installed.
+// bestAvailablePythonVersion returns the highest available Python version string (e.g. "3.12", "3.11").
+// Uses uv's built-in Python management for portability - no system-wide Python required.
 func (p *Probe) bestAvailablePythonVersion() string {
-	preferredOrder := []string{"python3.13", "python3.12", "python3.11"}
-	for _, name := range preferredOrder {
-		if _, err := p.lookPath(name); err == nil {
-			// Extract major.minor from the command name
-			var ver string
-			if strings.HasPrefix(name, "python") {
-				ver = strings.TrimPrefix(name, "python")
-			}
-			if ver != "" {
-				return ver
-			}
-		}
+	// Try to use uv's managed Python 3.12 (PyTorch 2.12.0 supports up to 3.12)
+	if err := p.ensureUvPython("3.12"); err == nil {
+		return "3.12"
 	}
-	// Fallback: try any python3.x and extract version
+	
+	// Fallback: try uv-managed Python 3.11
+	if err := p.ensureUvPython("3.11"); err == nil {
+		return "3.11"
+	}
+	
+	// Ultimate fallback - but this requires system Python
 	for _, cmd := range []string{"python3", "python"} {
 		if path, _ := p.lookPath(cmd); path != "" {
 			out, err := p.run(context.Background(), path, "--version")
 			if err == nil {
-				// Output like "Python 3.12.5" or "Python 3.13.0"
 				parts := strings.Fields(strings.TrimSpace(string(out)))
 				if len(parts) >= 2 && strings.HasPrefix(parts[1], "3.") {
 					return parts[1]
@@ -218,6 +229,95 @@ func (p *Probe) bestAvailablePythonVersion() string {
 	return "3.12" // Ultimate fallback
 }
 
+// ensureUvPython installs and verifies a specific Python version via uv.
+// Returns nil if successful, error otherwise.
+func (p *Probe) ensureUvPython(version string) error {
+	uv := p.UvCommand()
+	
+	// Install Python via uv if not already installed
+	_, err := p.run(context.Background(), uv, "python", "install", version)
+	if err != nil {
+		return fmt.Errorf("failed to install Python %s via uv: %w", version, err)
+	}
+	
+	// Verify installation by finding the exact path
+	out, err := p.run(context.Background(), uv, "python", "find", version)
+	if err != nil {
+		return fmt.Errorf("failed to find Python %s: %w", version, err)
+	}
+	
+	path := strings.TrimSpace(string(out))
+	if path == "" {
+		return fmt.Errorf("uv returned empty path for Python %s", version)
+	}
+	
+	// Verify the Python binary works
+	_, err = p.run(context.Background(), path, "--version")
+	if err != nil {
+		return fmt.Errorf("Python %s verification failed: %w", version, err)
+	}
+	
+	return nil
+}
+
+func (p *Probe) BackendCheck(repoRoot string) BackendCheckResult {
+	result := BackendCheckResult{Timestamp: time.Now().Unix()}
+	pythonCmd := p.PythonCommand()
+	backendScript := filepath.Join(repoRoot, "backend", "rve-backend.py")
+	
+	// Check if backend script exists
+	if _, err := os.Stat(backendScript); err != nil {
+		result.Status = "fail"
+		result.Items = append(result.Items, CheckItem{Name: "backend_script", Pass: false, Error: "Backend script not found"})
+		return result
+	}
+	
+	// Run backend --list-backends
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, err := p.run(ctx, pythonCmd, backendScript, "--list-backends")
+	if err != nil {
+		result.Status = "fail"
+		result.Items = append(result.Items, CheckItem{Name: "python_execution", Pass: false, Error: err.Error()})
+		return result
+	}
+	
+	output := strings.TrimSpace(string(out))
+	lines := strings.Split(output, "\n")
+	
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || line == "DaSiWa TrueVideoEnhancer Backends:" || line == strings.Repeat("=", len(line)) {
+			continue
+		}
+		
+		checkItem := CheckItem{}
+		if strings.HasPrefix(line, "[✓]") {
+			checkItem.Pass = true
+			checkItem.Name = strings.TrimPrefix(line, "[✓] ")
+		} else if strings.HasPrefix(line, "[✗]") {
+			checkItem.Pass = false
+			checkItem.Name = strings.TrimPrefix(line, "[✗] ")
+		} else {
+			continue
+		}
+		
+		result.Items = append(result.Items, checkItem)
+		result.TotalCount++
+		if checkItem.Pass {
+			result.PassedCount++
+		}
+	}
+	
+	if result.PassedCount == result.TotalCount && result.TotalCount > 0 {
+		result.Status = "ok"
+	} else {
+		result.Status = "fail"
+	}
+	
+	return result
+}
+
 func (p *Probe) Install(ctx context.Context, repoRoot string, options InstallOptions, logf func(string)) error {
 	if logf == nil {
 		logf = func(string) {}
@@ -225,6 +325,12 @@ func (p *Probe) Install(ctx context.Context, repoRoot string, options InstallOpt
 	if err := os.MkdirAll(p.rootDir, 0755); err != nil {
 		return err
 	}
+
+	// Completely remove existing venv to ensure clean upgrade
+	venvPath := filepath.Join(p.rootDir, "venv")
+	os.RemoveAll(venvPath)
+	logf("Removed existing virtual environment for clean upgrade")
+
 	uv := p.UvCommand()
 	if _, err := p.lookPath(uv); err != nil {
 		if err := p.bootstrapUv(ctx, logf); err != nil {
@@ -497,135 +603,4 @@ func firstLine(text string) string {
 	}
 	line, _, _ := strings.Cut(text, "\n")
 	return strings.TrimSpace(line)
-}
-
-// BackendCheck runs the Python backend with --list-backends and returns structured check results.
-func (p *Probe) BackendCheck(repoRoot string) BackendCheckResult {
-	pythonCmd := p.PythonCommand()
-	backendScript := filepath.Join(repoRoot, "backend", "rve-backend.py")
-
-	items := []CheckItem{}
-	timestamp := time.Now().Unix()
-
-	// Check 1: Python available + version
-	pyTool := p.toolVersion(pythonCmd, "--version")
-	if pyTool.Available {
-		items = append(items, CheckItem{Name: "Python runtime", Pass: true, Detail: pyTool.Version})
-	} else {
-		items = append(items, CheckItem{Name: "Python runtime", Pass: false, Error: pyTool.Error})
-		timestamp = 0 // skip timestamp if python isn't available
-	}
-
-	// Check 2: Backend script exists
-	if _, err := os.Stat(backendScript); err == nil {
-		items = append(items, CheckItem{Name: "Backend script", Pass: true, Detail: filepath.Base(backendScript)})
-	} else {
-		items = append(items, CheckItem{Name: "Backend script", Pass: false, Error: err.Error()})
-	}
-
-	// Run --list-backends to get TensorRT / PyTorch / NCNN + GPU info
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	out, runErr := p.run(ctx, pythonCmd, backendScript, "--list_backends")
-
-	lines := strings.Split(string(out), "\n")
-	hasTensorRT := false
-	hasPyTorch := false
-	hasGPU := false
-	hasFP16Line := false
-
-	if len(out) > 0 {
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-
-			if strings.HasPrefix(line, "RVE Backend Version:") {
-				v := strings.TrimPrefix(line, "RVE Backend Version: ")
-				items = append(items, CheckItem{Name: "Backend version", Pass: true, Detail: v})
-			} else if strings.HasPrefix(line, "TensorRT Version:") {
-				hasTensorRT = true
-				v := strings.TrimPrefix(line, "TensorRT Version: ")
-				items = append(items, CheckItem{Name: "TensorRT backend", Pass: true, Detail: v})
-			} else if strings.Contains(line, "Cannot use tensorrt") && !hasTensorRT {
-				hasFP16Line = false // irrelevant without TRT
-				errMsg := line
-				if idx := strings.Index(errMsg, ":"); idx >= 0 {
-					errMsg = errMsg[idx+1:]
-				}
-				items = append(items, CheckItem{Name: "TensorRT backend", Pass: false, Error: strings.TrimSpace(errMsg)})
-			} else if strings.HasPrefix(line, "PyTorch Version:") {
-				hasPyTorch = true
-				v := strings.TrimPrefix(line, "PyTorch Version: ")
-				items = append(items, CheckItem{Name: "PyTorch backend", Pass: true, Detail: v})
-			} else if strings.HasPrefix(line, "PyTorch GPU 0:") {
-				hasGPU = true
-				gpu := strings.TrimPrefix(line, "PyTorch GPU 0: ")
-				items = append(items, CheckItem{Name: "GPU detected", Pass: true, Detail: gpu})
-			} else if strings.HasPrefix(line, "NCNN Version:") {
-				v := strings.TrimPrefix(line, "NCNN Version: ")
-				items = append(items, CheckItem{Name: "NCNN backend", Pass: true, Detail: v})
-			} else if strings.Contains(line, "Half precision support:") {
-				hasFP16Line = true
-				if strings.Contains(line, ": True") || strings.Contains(line, ":true") {
-					items = append(items, CheckItem{Name: "FP16 / Half-precision", Pass: true, Detail: "Supported"})
-				} else if strings.Contains(line, ": False") || strings.Contains(line, ":false") {
-					items = append(items, CheckItem{Name: "FP16 / Half-precision", Pass: false, Error: "Not supported on this GPU (requires RTX 20+)"})
-				}
-			}
-		}
-
-		// Add missing components if --list-backends ran but didn't report them
-		if runErr == nil { // command succeeded at least partially
-			if !hasTensorRT && len(items) > 0 {
-				items = append(items, CheckItem{Name: "TensorRT backend", Pass: false, Error: "Not installed"})
-			}
-			if hasPyTorch && !hasGPU {
-				items = append(items, CheckItem{Name: "GPU detected", Pass: false, Error: "No GPU found by PyTorch (CPU-only mode)"})
-			}
-			if !hasFP16Line {
-				// FP16 status unknown — only add if we got partial output without it
-				items = append(items, CheckItem{Name: "FP16 / Half-precision", Pass: false, Error: "Status not reported"})
-			}
-		}
-
-		if !hasPyTorch && runErr == nil {
-			items = append(items, CheckItem{Name: "PyTorch backend", Pass: false, Error: "Not detected in --list-backends output"})
-		}
-	} else if runErr != nil {
-		// Command failed completely — report it
-		items = append(items, CheckItem{
-			Name:   "Backend diagnostics (--list-backends)",
-			Pass:   false,
-			Error:  fmt.Sprintf("Command failed: %v", runErr),
-		})
-	} else {
-		// ran but empty output — something is wrong with the script
-		items = append(items, CheckItem{
-			Name:   "Backend diagnostics (--list-backends)",
-			Pass:   false,
-			Error:  "--list-backends returned no output",
-		})
-	}
-
-	passCount := 0
-	for _, item := range items {
-		if item.Pass {
-			passCount++
-		}
-	}
-
-	status := "ok"
-	for _, item := range items {
-		if !item.Pass {
-			status = "fail"
-			break
-		}
-	}
-
-	return BackendCheckResult{
-		Status:      status,
-		Timestamp:   timestamp,
-		Items:       items,
-		PassedCount: passCount,
-		TotalCount:  len(items),
-	}
 }

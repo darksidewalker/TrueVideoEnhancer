@@ -241,7 +241,15 @@ func homeBrowsePath() string {
 
 // browseFiles lists directories in the user's home directory, filtering to video files.
 func (s *Server) browseFiles(w http.ResponseWriter, r *http.Request) {
-	path := cleanPath(r.URL.Query().Get("path"), homeBrowsePath())
+	// Check for saved browse path cookie
+	path := cleanPath(r.URL.Query().Get("path"), "")
+	if path == "" {
+		if cookie, err := r.Cookie("last_browse_path"); err == nil && cookie.Value != "" {
+			path = cookie.Value
+		} else {
+			path = homeBrowsePath()
+		}
+	}
 	entries, err := os.ReadDir(path)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
