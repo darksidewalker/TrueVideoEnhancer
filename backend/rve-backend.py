@@ -290,12 +290,8 @@ class VideoPipeline:
         actually_interp = interpolator is not None and self.args.interpolate_factor > 1.0
 
         if not actually_upscale and not actually_interp:
-            # No processing needed, just copy frames
-            for fp in frame_paths:
-                dest = os.path.join(self.temp_dir, os.path.basename(fp))
-                shutil.copy2(fp, dest)
-                processed.append(dest)
-            return processed
+            # No processing needed, frames are already in temp_dir — use them directly
+            return [str(fp) for fp in frame_paths]
 
         # Process each frame
         prev_frame = None
