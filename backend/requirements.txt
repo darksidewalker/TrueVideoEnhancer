@@ -1,0 +1,18 @@
+--extra-index-url https://download.pytorch.org/whl/cu132
+
+sympy
+tqdm
+typing_extensions
+packaging
+requests
+opencv-python-headless==5.0.0.93
+pillow
+numpy==2.5.0
+
+cupy-cuda13x>=14.1.1
+scenedetect
+torch==2.12.0+cu132
+torchvision==0.17.0+cu132
+einops
+safetensors
+torch_tensorrt==2.12.0+cu132
