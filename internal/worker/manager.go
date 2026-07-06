@@ -30,6 +30,7 @@ type Manager struct {
 
 const maxStoredLogLines = 800
 const _PREVIEW_MARKER = "<PREVIEW>"
+const _VIDEO_CODEC_MARKER = "<VIDEO_CODEC>"
 
 type Event struct {
 	Type string `json:"type"`
@@ -48,6 +49,7 @@ type Job struct {
 	Logs        []string  `json:"logs"`
 	Error       string    `json:"error,omitempty"`
 	LivePreview []byte    `json:"-"` // Base64-decoded JPEG frame (in-memory only)
+	VideoCodec  string    `json:"video_codec,omitempty"` // Resolved video codec from backend
 	cancel      context.CancelFunc
 }
 
@@ -232,6 +234,9 @@ func (m *Manager) run(ctx context.Context, id string, args []string) {
 				if decoded, err := base64.StdEncoding.DecodeString(base64Data); err == nil {
 					m.setLivePreview(id, decoded)
 				}
+			} else if strings.HasPrefix(line, _VIDEO_CODEC_MARKER) {
+				codec := line[len(_VIDEO_CODEC_MARKER):]
+				m.setVideoCodec(id, codec)
 			} else if len(line) > 0 {
 				// Non-preview stderr lines are also logged
 				m.appendLog(id, line)
@@ -474,6 +479,14 @@ func (m *Manager) setLivePreview(id string, data []byte) {
 	m.mu.Lock()
 	if job := m.jobs[id]; job != nil {
 		job.LivePreview = data
+	}
+	m.mu.Unlock()
+}
+
+func (m *Manager) setVideoCodec(id string, codec string) {
+	m.mu.Lock()
+	if job := m.jobs[id]; job != nil {
+		job.VideoCodec = codec
 	}
 	m.mu.Unlock()
 }

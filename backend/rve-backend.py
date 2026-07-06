@@ -557,6 +557,10 @@ def render(args) -> None:
         info.get("audio_codec", ""),
         info.get("subtitle_codec", ""),
     )
+    # Emit resolved video codec immediately so the frontend can update the
+    # output filename tag from "[auto]" to the actual codec in real-time.
+    resolved_codec = encoder_args(args.video_encoder_preset, args.crf, args.video_pixel_format)[1]
+    print(f"<VIDEO_CODEC>{resolved_codec}", file=sys.stderr, flush=True)
     output_fps, factor = derive_target_fps(info["fps"], args.target_fps)
     
     # Apply RTX upscale if enabled

@@ -585,6 +585,16 @@ function outputResolutionTag() {
   return `${scale || 1}x`;
 }
 
+function videoCodecTag() {
+  // If we have a resolved codec from the backend, use it
+  if (currentJob && currentJob.video_codec) {
+    return currentJob.video_codec;
+  }
+  // Otherwise fall back to user selection
+  const selected = $("videoEncoderPreset").value || "auto";
+  return selected === "auto" ? "av1_nvenc" : selected; // fallback to common default
+}
+
 function buildOutputPath(inputPath) {
   const input = splitPath(inputPath.trim());
   if (!input.name) return "";
@@ -596,7 +606,7 @@ function buildOutputPath(inputPath) {
     outputResolutionTag(),
     $("audioBitrate").value || "copy",
     audioFilenameTag(),
-    $("videoEncoderPreset").value || "video",
+    videoCodecTag(),
   ].map(safeTag).filter(Boolean);
   return `${input.dir}${input.name}${tags.map((tag) => `[${tag}]`).join("")}.${container}`;
 }
