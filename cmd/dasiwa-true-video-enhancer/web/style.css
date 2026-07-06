@@ -74,12 +74,25 @@ button {
   padding: 11px 14px;
 }
 .primary { width: 100%; margin-top: 10px; background: linear-gradient(90deg, var(--cyan), #8c7dff); color: #021016; font-weight: 800; }
+.run-row { display: flex; gap: 10px; align-items: center; margin-top: 10px; }
+.run-row .primary { margin-top: 0; }
+.run-button { width: auto; min-width: 118px; padding: 10px 16px; border-radius: 999px; }
+.run-button span { display: inline-block; margin-right: 6px; font-size: 12px; }
+.run-row #openTune { flex: 1; }
 .danger { border-color: rgba(255,95,131,.65); color: #ffdbe3; background: rgba(255,95,131,.12); }
 .danger:hover { background: rgba(255,95,131,.22); }
-.timeline { height: 145px; display: grid; grid-template-columns: repeat(8, 1fr); gap: 7px; margin: 16px 0 20px; }
-.timeline i { display: block; border-radius: 10px; background: linear-gradient(180deg, rgba(99,243,255,.55), rgba(255,189,90,.2)); border: 1px solid rgba(255,255,255,.12); }
-.timeline i:nth-child(2n) { transform: translateY(18px); background: linear-gradient(180deg, rgba(255,95,131,.45), rgba(99,243,255,.13)); }
 pre { margin: 0; white-space: pre-wrap; color: #cbd7e8; min-height: 160px; }
+#log { max-height: 360px; overflow-y: auto; overflow-x: hidden; border: 1px solid var(--line); border-radius: 14px; padding: 14px; background: rgba(5, 8, 13, .55); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+.eta-card { display: grid; gap: 2px; padding: 12px 14px; margin-bottom: 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel-2); }
+.eta-card span { color: var(--amber); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+.eta-card strong { color: var(--text); font-size: 22px; }
+.eta-card small { color: var(--muted); }
+.video-preview { display: block; width: 100%; max-height: 270px; margin: 12px 0; border-radius: 16px; border: 1px solid var(--line); background: #000; }
+.video-preview.ready { display: block; }
+.encode-preview { display: none; width: 100%; max-height: 270px; object-fit: contain; margin: 12px 0; border-radius: 16px; border: 1px solid var(--line); background: #000; }
+.encode-preview.ready { display: block; }
+.preview-panel.encoding .video-preview { display: none; }
+.preview-panel.encoding .encode-preview { display: block; }
 dialog { border: 0; padding: 0; background: transparent; width: min(680px, calc(100% - 24px)); }
 dialog::backdrop { background: rgba(0,0,0,.7); }
 .drawer { padding: 22px; max-height: min(86vh, 820px); overflow: auto; }
@@ -167,6 +180,3 @@ dialog::backdrop { background: rgba(0,0,0,.7); }
   }
 }
 @keyframes pulse { to { filter: brightness(1.35); transform: translateY(8px); } }
-@media (prefers-reduced-motion: no-preference) {
-  .timeline i { animation: pulse 2.4s ease-in-out infinite alternate; }
-}

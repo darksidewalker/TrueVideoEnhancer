@@ -113,6 +113,8 @@ def probe_video(input_path: str) -> dict:
         raise RuntimeError(f"ffprobe failed: {proc.stderr.strip()}")
     data = json.loads(proc.stdout or "{}")
     video = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), None)
+    audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
+    subtitle = next((s for s in data.get("streams", []) if s.get("codec_type") == "subtitle"), None)
     if not video:
         raise RuntimeError("input contains no video stream")
     fps = _ratio_to_float(video.get("avg_frame_rate", "0/1")) or _ratio_to_float(video.get("r_frame_rate", "0/1"))
@@ -121,7 +123,14 @@ def probe_video(input_path: str) -> dict:
     width = int(video.get("width", 0) or 0)
     height = int(video.get("height", 0) or 0)
     duration = float(video.get("duration") or data.get("format", {}).get("duration") or 0.0)
-    return {"fps": fps, "width": width, "height": height, "duration": duration}
+    return {
+        "fps": fps,
+        "width": width,
+        "height": height,
+        "duration": duration,
+        "audio_codec": audio.get("codec_name", "") if audio else "",
+        "subtitle_codec": subtitle.get("codec_name", "") if subtitle else "",
+    }
 
 
 def derive_target_fps(source_fps: float, target_fps: float | None) -> tuple[float, float]:
@@ -179,18 +188,13 @@ def _to_bgr(tensor):
 
 def select_interpolation_model(args) -> str:
     model_path = resolve_model_path(args.interpolate_model)
-    content_type = (args.content_type or "mixed").strip().lower()
     name = Path(model_path).name.lower()
-    if content_type != "anime" and "heavy" in name:
+    if "heavy" in name:
         general = Path(model_path).with_name("rife_v4.26.safetensors")
         if general.exists():
-            log("WARN", "Heavy RIFE is anime-specialized; switching to general RIFE for non-anime content", detail=f"content_type={content_type} selected={Path(model_path).name} using={general.name}")
+            log("WARN", "RIFE Heavy is disabled due to known errors; using general RIFE", detail=f"selected={Path(model_path).name} using={general.name}")
             return str(general)
-        log("WARN", "Heavy RIFE is anime-specialized but general RIFE model is missing", detail=f"content_type={content_type} selected={Path(model_path).name}")
-    elif content_type == "anime" and "heavy" in name:
-        log("TECH", "Anime content selected: keeping RIFE Heavy Anime model")
-    elif content_type == "anime":
-        log("WARN", "Anime content selected but non-heavy RIFE model is configured", detail=f"selected={Path(model_path).name}")
+        log("WARN", "RIFE Heavy is disabled but general RIFE model is missing", detail=f"selected={Path(model_path).name}")
     return model_path
 
 
@@ -212,7 +216,7 @@ def build_interpolator(args, width: int, height: int):
 
 
 def write_target_frames(source_frames: list[Path], output_dir: Path, source_fps: float,
-                        target_fps: float, interpolator) -> int:
+                        target_fps: float, interpolator, preview_dir: Path | None = None) -> int:
     """Generate a CFR frame sequence at target_fps from source frame times.
 
     For each output timestamp, choose the adjacent source pair and the exact
@@ -259,9 +263,37 @@ def write_target_frames(source_frames: list[Path], output_dir: Path, source_fps:
         out_path = output_dir / f"{out_idx + 1:08d}.png"
         if not cv2.imwrite(str(out_path), out):
             raise RuntimeError(f"failed to write output frame: {out_path}")
+        update_live_preview(out, preview_dir)
         if (out_idx + 1) % 50 == 0 or out_idx + 1 == out_count:
             log("PIPE", f"wrote {out_idx + 1}/{out_count} frames")
     return out_count
+
+
+def write_source_cadence_frames(source_frames: list[Path], output_dir: Path, preview_dir: Path | None = None) -> int:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    total = len(source_frames)
+    log("PIPE", f"output_frames={total} target_fps=source", detail="interpolation=skipped")
+    for idx, frame in enumerate(source_frames, start=1):
+        shutil.copy2(frame, output_dir / f"{idx:08d}.png")
+        if preview_dir and cv2 is not None:
+            update_live_preview(cv2.imread(str(frame), cv2.IMREAD_COLOR), preview_dir)
+        if idx % 50 == 0 or idx == total:
+            log("PIPE", f"wrote {idx}/{total} frames")
+    return total
+
+
+def update_live_preview(frame, preview_dir: Path | None) -> None:
+    if preview_dir is None or frame is None or cv2 is None:
+        return
+    preview_dir.mkdir(parents=True, exist_ok=True)
+    height, width = frame.shape[:2]
+    if width > 640:
+        scale = 640 / float(width)
+        frame = cv2.resize(frame, (640, max(2, int(height * scale))), interpolation=cv2.INTER_AREA)
+    tmp = preview_dir / "latest.tmp.jpg"
+    target = preview_dir / "latest.jpg"
+    if cv2.imwrite(str(tmp), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82]):
+        tmp.replace(target)
 
 
 def derive_output_resolution(width: int, height: int, scale: int, override_scale: int = 0) -> tuple[int, int]:
@@ -300,10 +332,157 @@ def encoder_args(encoder: str, crf: str, pix_fmt: str) -> list[str]:
     return ["-c:v", "libx264", "-preset", "medium", "-crf", quality, "-pix_fmt", pix]
 
 
+def available_ffmpeg_encoders() -> set[str]:
+    proc = _run([_ffmpeg(), "-hide_banner", "-encoders"])
+    if proc.returncode != 0:
+        log("WARN", "Could not query FFmpeg encoders; using conservative fallback", detail=proc.stderr.strip())
+        return set()
+    encoders: set[str] = set()
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].startswith("V"):
+            encoders.add(parts[1])
+    return encoders
+
+
+def ffmpeg_codec_name(preset: str) -> str:
+    enc = (preset or "").strip()
+    if enc in {"x264_nvenc", "h264_nvenc"}:
+        return "h264_nvenc"
+    if enc in {"x265_nvenc", "hevc_nvenc"}:
+        return "hevc_nvenc"
+    if enc == "av1":
+        return "libsvtav1"
+    if enc == "vp9":
+        return "libvpx-vp9"
+    if enc == "vp8":
+        return "libvpx"
+    return enc
+
+
+def container_name(output_video: str) -> str:
+    return Path(output_video).suffix.lower().lstrip(".")
+
+
+def container_video_candidates(container: str) -> list[str]:
+    # Preference order: modern/efficient first, then broadly compatible fallbacks.
+    if container == "webm":
+        return ["av1_nvenc", "vp9", "vp8", "av1"]
+    if container in {"mp4", "m4v"}:
+        return ["av1_nvenc", "x265_nvenc", "x264_nvenc", "libx265", "libx264", "av1"]
+    if container in {"mov", "mkv"}:
+        return ["av1_nvenc", "x265_nvenc", "x264_nvenc", "libx265", "libx264", "av1", "prores", "ffv1"]
+    if container == "ts":
+        return ["x265_nvenc", "x264_nvenc", "libx265", "libx264"]
+    if container == "flv":
+        return ["x264_nvenc", "libx264"]
+    if container == "avi":
+        return ["x264_nvenc", "libx264", "ffv1"]
+    return ["av1_nvenc", "x265_nvenc", "x264_nvenc", "av1", "libx265", "libx264"]
+
+
+def is_video_preset_supported(preset: str, encoders: set[str]) -> bool:
+    codec = ffmpeg_codec_name(preset)
+    if encoders and codec not in encoders:
+        return False
+    proc = _run([
+        _ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "lavfi", "-i", "color=c=black:s=64x64:r=1",
+        "-frames:v", "1", "-c:v", codec, "-f", "null", "-",
+    ])
+    return proc.returncode == 0
+
+
+def select_auto_video_encoder(output_video: str, encoders: set[str]) -> str:
+    container = container_name(output_video)
+    for preset in container_video_candidates(container):
+        if is_video_preset_supported(preset, encoders):
+            log("TECH", "auto video encoder selected", detail=f"container={container or 'unknown'} encoder={preset} ffmpeg={ffmpeg_codec_name(preset)}")
+            return preset
+    log("WARN", "No preferred encoder available; falling back to libx264", detail=f"container={container or 'unknown'}")
+    return "libx264"
+
+
+def normalize_video_encoder(output_video: str, encoder: str) -> str:
+    requested = (encoder or "auto").strip()
+    encoders = available_ffmpeg_encoders()
+    if requested in {"", "auto"}:
+        return select_auto_video_encoder(output_video, encoders)
+    if is_video_preset_supported(requested, encoders):
+        return requested
+    fallback = select_auto_video_encoder(output_video, encoders)
+    log("WARN", "Requested FFmpeg video encoder is unavailable; using auto fallback", detail=f"requested={requested} fallback={fallback}")
+    return fallback
+
+
+def webm_safe_settings(output_video: str, encoder: str, audio_encoder: str,
+                       subtitle_encoder: str, input_audio_codec: str,
+                       input_subtitle_codec: str) -> tuple[str, str, str]:
+    """Normalize codec settings for WebM before the final mux.
+
+    FFmpeg rejects H.264/H.265/AAC/etc. in WebM only after the expensive frame
+    processing stage. Adjust WebM jobs before encoding so completed RIFE work is
+    written instead of failing at header creation.
+    """
+    if container_name(output_video) != "webm":
+        return encoder, audio_encoder, subtitle_encoder
+
+    requested_video = (encoder or "libx264").strip()
+    requested_audio = (audio_encoder or "copy_audio").strip()
+    requested_subtitle = (subtitle_encoder or "copy_subtitle").strip()
+
+    webm_video = {"vp8", "vp9", "av1", "av1_nvenc", "libvpx", "libvpx-vp9", "libsvtav1", "libaom-av1"}
+    webm_audio = {"opus", "libopus", "vorbis", "libvorbis"}
+    webm_subtitle = {"webvtt"}
+
+    safe_video = requested_video
+    if requested_video not in webm_video:
+        safe_video = "vp9"
+        log("WARN", "WebM does not support requested video codec; using VP9", detail=f"requested={requested_video}")
+
+    safe_audio = requested_audio
+    if requested_audio in {"", "copy", "copy_audio"}:
+        if input_audio_codec and input_audio_codec not in {"opus", "vorbis"}:
+            safe_audio = "opus"
+            log("WARN", "WebM cannot copy input audio codec; using Opus", detail=f"input_audio={input_audio_codec}")
+    elif requested_audio not in webm_audio:
+        safe_audio = "opus"
+        log("WARN", "WebM does not support requested audio codec; using Opus", detail=f"requested={requested_audio}")
+
+    safe_subtitle = requested_subtitle
+    if requested_subtitle in {"", "copy", "copy_subtitle"}:
+        if input_subtitle_codec and input_subtitle_codec not in webm_subtitle:
+            safe_subtitle = "webvtt"
+            log("WARN", "WebM cannot copy input subtitle codec; using WebVTT", detail=f"input_subtitle={input_subtitle_codec}")
+    elif requested_subtitle not in webm_subtitle:
+        safe_subtitle = "webvtt"
+        log("WARN", "WebM does not support requested subtitle codec; using WebVTT", detail=f"requested={requested_subtitle}")
+
+    return safe_video, safe_audio, safe_subtitle
+
+
+def normalize_encode_settings(output_video: str, encoder: str, audio_encoder: str,
+                              subtitle_encoder: str, input_audio_codec: str,
+                              input_subtitle_codec: str) -> tuple[str, str, str]:
+    video = normalize_video_encoder(output_video, encoder)
+    return webm_safe_settings(
+        output_video,
+        video,
+        audio_encoder,
+        subtitle_encoder,
+        input_audio_codec,
+        input_subtitle_codec,
+    )
+
+
 def audio_args(audio_encoder: str, audio_bitrate: str | None) -> list[str]:
     enc = (audio_encoder or "copy_audio").strip()
     if enc in {"", "copy", "copy_audio"}:
         return ["-c:a", "copy"]
+    if enc == "opus":
+        enc = "libopus"
+    if enc == "vorbis":
+        enc = "libvorbis"
     args = ["-c:a", enc]
     if audio_bitrate:
         args += ["-b:a", audio_bitrate]
@@ -347,23 +526,36 @@ def render(args) -> None:
     log("PIPE", f"input={args.input}", detail=f"output={args.output}")
     info = probe_video(args.input)
     log("TECH", "video_probe", detail=f"source={info['width']}x{info['height']} fps={info['fps']:.6g} duration={info['duration']:.3f}s")
+    args.video_encoder_preset, args.audio_encoder_preset, args.subtitle_encoder_preset = normalize_encode_settings(
+        args.output,
+        args.video_encoder_preset,
+        args.audio_encoder_preset,
+        args.subtitle_encoder_preset,
+        info.get("audio_codec", ""),
+        info.get("subtitle_codec", ""),
+    )
     output_fps, factor = derive_target_fps(info["fps"], args.target_fps)
     output_width, output_height = derive_output_resolution(
         info["width"], info["height"], args.scale, args.override_upscale_scale,
     )
     log("RES", f"source={info['width']}x{info['height']} target={output_width}x{output_height}", detail=f"scale={args.override_upscale_scale or args.scale} upscale_model={args.upscale_model or 'none'}")
     if args.interpolate_model and factor <= 1.0:
-        log("WARN", "interpolation model selected but no FPS increase requested; copying source cadence")
-    if not args.interpolate_model:
+        log("WARN", "interpolation model selected but no FPS increase requested; skipping RIFE")
+    if factor > 1.0 and not args.interpolate_model:
         raise RuntimeError("--interpolate_model is required for frame interpolation")
 
+    preview_dir = Path(args.preview_dir) if args.preview_dir else None
     with tempfile.TemporaryDirectory(prefix="dasiwa-rife-") as td:
         temp = Path(td)
         src = extract_source_frames(args.input, temp / "source")
-        interpolator = build_interpolator(args, info["width"], info["height"])
-        count = write_target_frames(src, temp / "frames", info["fps"], output_fps, interpolator)
+        frame_dir = temp / "frames"
+        if factor > 1.0:
+            interpolator = build_interpolator(args, info["width"], info["height"])
+            count = write_target_frames(src, frame_dir, info["fps"], output_fps, interpolator, preview_dir)
+        else:
+            count = write_source_cadence_frames(src, frame_dir, preview_dir)
         encode_video(
-            args.input, args.output, temp / "frames", output_fps,
+            args.input, args.output, frame_dir, output_fps,
             args.crf, args.video_encoder_preset, args.video_pixel_format,
             args.audio_encoder_preset, args.subtitle_encoder_preset, args.audio_bitrate,
             output_width, output_height,
@@ -389,6 +581,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--list-backends", action="store_true")
     parser.add_argument("--input")
     parser.add_argument("--output")
+    parser.add_argument("--preview_dir", default="")
     parser.add_argument("--backend", choices=["pytorch", "tensorrt", "onnxruntime"], default="tensorrt")
     parser.add_argument("--precision", choices=["float16", "float32"], default="float16")
     parser.add_argument("--overwrite", action="store_true")
@@ -398,7 +591,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target_fps", type=float, default=0.0)
     parser.add_argument("--content_type", default="mixed", choices=["anime", "mixed", "realism"])
     parser.add_argument("--crf", default="18")
-    parser.add_argument("--video_encoder_preset", default="fast")
+    parser.add_argument("--video_encoder_preset", default="auto")
     parser.add_argument("--video_pixel_format", default="yuv420p")
     parser.add_argument("--audio_encoder_preset", default="copy")
     parser.add_argument("--subtitle_encoder_preset", default="copy")

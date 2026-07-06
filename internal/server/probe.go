@@ -10,18 +10,19 @@ import (
 
 // ProbeMeta holds ffprobe-derived metadata for a video file.
 type ProbeMeta struct {
-	InputPath       string  `json:"input_path"`
-	Duration        float64 `json:"duration,omitempty"`
-	RFrameRate      string  `json:"r_frame_rate"`
-	Width           int     `json:"width,omitempty"`
-	Height          int     `json:"height,omitempty"`
-	CodecName       string  `json:"codec_name"`
-	SampleRate      string  `json:"sample_rate,omitempty"`
-	BitRate         string  `json:"bitrate,omitempty"`
-	ColorPrimaries  string  `json:"color_primaries,omitempty"`
-	ColorTransfer   string  `json:"color_transfer,omitempty"`
-	NBStreams       int     `json:"nb_streams"`
-	Error           string  `json:"error,omitempty"`
+	InputPath      string  `json:"input_path"`
+	Duration       float64 `json:"duration,omitempty"`
+	RFrameRate     string  `json:"r_frame_rate"`
+	Width          int     `json:"width,omitempty"`
+	Height         int     `json:"height,omitempty"`
+	CodecName      string  `json:"codec_name"`
+	AudioCodec     string  `json:"audio_codec,omitempty"`
+	SampleRate     string  `json:"sample_rate,omitempty"`
+	BitRate        string  `json:"bitrate,omitempty"`
+	ColorPrimaries string  `json:"color_primaries,omitempty"`
+	ColorTransfer  string  `json:"color_transfer,omitempty"`
+	NBStreams      int     `json:"nb_streams"`
+	Error          string  `json:"error,omitempty"`
 }
 
 func probeVideo(w http.ResponseWriter, r *http.Request) {
@@ -82,6 +83,7 @@ func runProbe(path string) ProbeMeta {
 			meta.ColorTransfer, _ = s["color_transfer"].(string)
 		}
 		if ct == "audio" && meta.SampleRate == "" {
+			meta.AudioCodec, _ = s["codec_name"].(string)
 			meta.SampleRate, _ = s["sample_rate"].(string)
 		}
 	}

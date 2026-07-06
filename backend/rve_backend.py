@@ -943,6 +943,7 @@ class TRTInterpolator:
         self.context = context
         self.device = device
         self.technique = "RIFE optical-flow + TensorRT"
+        self.stream = torch.cuda.Stream(device=device) if "cuda" in str(device) else None  # type: ignore[union-attr]
 
     def interpolate(self, frame_a, frame_b, timestep=0.5):
         """Interpolate between two frames using TRT engine.
@@ -983,10 +984,13 @@ class TRTInterpolator:
             self.context.set_tensor_address("img1", int(inp_b.data_ptr()))
             self.context.set_tensor_address("timestep", int(ts.data_ptr()))
             self.context.set_tensor_address("output", int(out.data_ptr()))
-            stream = torch.cuda.current_stream(device=self.device).cuda_stream if "cuda" in str(self.device) else 0
-            self.context.execute_async_v3(stream)
-            if "cuda" in str(self.device):
-                torch.cuda.current_stream(device=self.device).synchronize()
+            if self.stream is not None:
+                self.stream.wait_stream(torch.cuda.current_stream(device=self.device))  # type: ignore[union-attr]
+                with torch.cuda.stream(self.stream):  # type: ignore[union-attr]
+                    self.context.execute_async_v3(self.stream.cuda_stream)
+                self.stream.synchronize()
+            else:
+                self.context.execute_async_v3(0)
             return out[0].clamp(0, 1)
         except Exception as e:
             log("WARN", "TensorRT encoder execution failed -- falling back to PyTorch", detail=str(e))

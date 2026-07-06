@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -43,9 +44,13 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/quit", s.quit)
 	mux.HandleFunc("GET /api/browse", s.browseFiles)
 	mux.HandleFunc("GET /api/search-files", s.searchFiles)
+	mux.HandleFunc("GET /api/stream", s.streamVideo)
+	mux.HandleFunc("POST /api/open-folder", s.openFolder)
 	mux.HandleFunc("POST /api/jobs", s.startJob)
 	mux.HandleFunc("GET /api/jobs/{id}", s.getJob)
 	mux.HandleFunc("GET /api/jobs/{id}/events", s.jobEvents)
+	mux.HandleFunc("GET /api/jobs/{id}/live-preview", s.jobLivePreview)
+	mux.HandleFunc("GET /api/jobs/{id}/preview", s.jobPreview)
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", s.cancelJob)
 	mux.Handle("/", http.FileServer(http.FS(s.cfg.Web)))
 	return withNoCache(mux)
@@ -211,7 +216,7 @@ func (s *Server) runtimeModels(w http.ResponseWriter, _ *http.Request) {
 
 func (s *Server) options(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"video_encoder_presets":    []string{"libx264", "libx265", "vp9", "av1", "prores", "ffv1", "x264_nvenc", "x265_nvenc", "av1_nvenc"},
+		"video_encoder_presets":    []string{"auto", "av1_nvenc", "x265_nvenc", "x264_nvenc", "av1", "libx265", "libx264", "vp9", "prores", "ffv1"},
 		"output_containers":        []string{"mp4", "mkv", "webm", "mov", "avi", "flv", "ts", "m4v"},
 		"video_pixel_formats":      []string{"yuv420p", "yuv422p", "yuv444p", "yuv420p10le", "yuv422p10le", "yuv444p10le"},
 		"audio_encoder_presets":    []string{"copy_audio", "aac", "libmp3lame", "opus"},
@@ -344,6 +349,56 @@ func isVideoFile(path string) bool {
 	}
 }
 
+func (s *Server) streamVideo(w http.ResponseWriter, r *http.Request) {
+	path := cleanPath(r.URL.Query().Get("path"), "")
+	if path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "video is not readable: "+err.Error())
+		return
+	}
+	if info.IsDir() || !isVideoFile(path) {
+		writeError(w, http.StatusBadRequest, "path is not a supported video file")
+		return
+	}
+	w.Header().Set("Cache-Control", "private, max-age=60")
+	http.ServeFile(w, r, path)
+}
+
+func (s *Server) openFolder(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Path string `json:"path"`
+		Job  string `json:"job"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	path := req.Path
+	if req.Job != "" {
+		if job, ok := s.cfg.Jobs.Get(req.Job); ok {
+			path = job.Output
+		}
+	}
+	path = cleanPath(path, "")
+	if path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	if info, err := os.Stat(path); err == nil && !info.IsDir() {
+		path = filepath.Dir(path)
+	}
+	if info, err := os.Stat(path); err != nil || !info.IsDir() {
+		writeError(w, http.StatusNotFound, "folder is not readable")
+		return
+	}
+	if err := exec.Command("xdg-open", path).Start(); err != nil {
+		writeError(w, http.StatusInternalServerError, "open folder failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "opened", "path": path})
+}
+
 func cleanPath(value, fallback string) string {
 	if value == "" {
 		value = fallback
@@ -384,6 +439,69 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, job)
+}
+
+func (s *Server) jobLivePreview(w http.ResponseWriter, r *http.Request) {
+	job, ok := s.cfg.Jobs.Get(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if job.Preview == "" {
+		writeError(w, http.StatusNotFound, "job has no live preview")
+		return
+	}
+	preview := filepath.Join(job.Preview, "latest.jpg")
+	if _, err := os.Stat(preview); err != nil {
+		writeError(w, http.StatusAccepted, "live preview is not ready yet")
+		return
+	}
+	w.Header().Set("Content-Type", "image/jpeg")
+	w.Header().Set("Cache-Control", "no-store")
+	http.ServeFile(w, r, preview)
+}
+
+func (s *Server) jobPreview(w http.ResponseWriter, r *http.Request) {
+	job, ok := s.cfg.Jobs.Get(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if job.Status != "done" {
+		writeError(w, http.StatusAccepted, "preview is available after the job finishes")
+		return
+	}
+	if job.Output == "" {
+		writeError(w, http.StatusNotFound, "job output is empty")
+		return
+	}
+	info, err := os.Stat(job.Output)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "job output is not readable: "+err.Error())
+		return
+	}
+	preview := filepath.Join(os.TempDir(), "dasiwa-previews", job.ID+"-"+fmt.Sprintf("%x", info.ModTime().UnixNano())+".mp4")
+	if _, err := os.Stat(preview); err != nil {
+		if err := os.MkdirAll(filepath.Dir(preview), 0755); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		cmd := exec.Command("ffmpeg",
+			"-hide_banner", "-loglevel", "error", "-y",
+			"-i", job.Output,
+			"-t", "20",
+			"-vf", "fps=12,scale='min(480,iw)':-2",
+			"-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
+			"-movflags", "+faststart", preview,
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			writeError(w, http.StatusInternalServerError, "preview encode failed: "+strings.TrimSpace(string(out)))
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "video/mp4")
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	http.ServeFile(w, r, preview)
 }
 
 func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {

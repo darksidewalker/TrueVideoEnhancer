@@ -2,6 +2,9 @@ const $ = (id) => document.getElementById(id);
 let jobEvents = null;
 let runtimeModels = [];
 let sourceProbe = null;
+let currentJob = null;
+let livePreviewTimer = null;
+const maxVisibleLogLines = 500;
 // Persisted model selections: { upscaler: "", interpolation: "" } where "" means Auto.
 const modelSelectionStorageVersion = "auto-dropdown-v1";
 function migrateModelSelectionStorage() {
@@ -67,15 +70,13 @@ function bestUpscalerModel() {
 
 function bestInterpolationModel() {
   if (!runtimeModels.length || !$("contentType")) return null;
-  const interpolation = runtimeModels.filter(function(m) { return m.category === "interpolation"; });
+  const interpolation = runtimeModels.filter(function(m) { return m.category === "interpolation" && !isHeavyRifeModel(m); });
   if (!interpolation.length) return null;
-  const contentType = $("contentType").value || "mixed";
-  const textOf = function(m) { return `${m.id || ""} ${m.name || ""} ${m.file || ""}`.toLowerCase(); };
-  if (contentType === "anime") {
-    const heavy = interpolation.find(function(m) { return textOf(m).includes("heavy"); });
-    if (heavy) return heavy;
-  }
-  return interpolation.find(function(m) { return !textOf(m).includes("heavy"); }) || interpolation[0];
+  return interpolation[0];
+}
+
+function isHeavyRifeModel(model) {
+  return `${model?.id || ""} ${model?.name || ""} ${model?.file || ""} ${model?.destination || ""}`.toLowerCase().includes("heavy");
 }
 
 function resolvedAutoModel(category) {
@@ -119,7 +120,7 @@ function populateModelDropdown(selectID, category, autoLabel) {
   auto.value = "";
   auto.textContent = autoLabel;
   select.appendChild(auto);
-  runtimeModels.filter(function(m) { return m.category === category; }).forEach(function(model) {
+  runtimeModels.filter(function(m) { return m.category === category && !(category === "interpolation" && isHeavyRifeModel(m)); }).forEach(function(model) {
     const option = document.createElement("option");
     option.value = model.id;
     option.textContent = `${model.name}${model.present ? "" : " (missing)"}`;
@@ -134,7 +135,9 @@ function updateModelAutoLabels() {
   const upAuto = $("upscaleModel")?.querySelector('option[value=""]');
   const rifeAuto = $("rifeModel")?.querySelector('option[value=""]');
   if (upAuto) upAuto.textContent = upscaler ? `Auto: ${upscaler.name}` : "Auto (no upscaling)";
-  if (rifeAuto) rifeAuto.textContent = interpolation ? `Auto: ${interpolation.name}` : "Auto (default interpolation)";
+  if (rifeAuto) rifeAuto.textContent = needsInterpolation()
+    ? (interpolation ? `Auto: ${interpolation.name}` : "Auto (default interpolation)")
+    : "Auto: no RIFE (target FPS <= source)";
 }
 
 async function api(path, options = {}) {
@@ -149,6 +152,38 @@ async function api(path, options = {}) {
     throw new Error(data.error || `${response.statusText}${details}`);
   }
   return data;
+}
+
+async function loadSourceProbe(path) {
+  const inputPath = (path || $("input")?.value || "").trim();
+  if (!inputPath) {
+    sourceProbe = null;
+    return null;
+  }
+  try {
+    const probe = await api(`/api/probe?path=${encodeURIComponent(inputPath)}`);
+    sourceProbe = probe.error ? null : probe;
+    return sourceProbe;
+  } catch (_) {
+    sourceProbe = null;
+    return null;
+  }
+}
+
+function parseRate(rate) {
+  if (!rate) return 0;
+  const text = String(rate);
+  if (text.includes("/")) {
+    const parts = text.split("/").map(Number);
+    if (parts[0] > 0 && parts[1] > 0) return parts[0] / parts[1];
+  }
+  return Number(text) || 0;
+}
+
+function needsInterpolation() {
+  const target = Number($("targetFps")?.value || 0);
+  const source = parseRate(sourceProbe?.r_frame_rate);
+  return target > 0 && (!source || target > source + 1e-6);
 }
 
 async function refreshRuntime() {
@@ -468,7 +503,7 @@ async function loadSupportedOptions() {
   try {
     const options = await api("/api/options");
     setSelectOptions("outputContainer", options.output_containers, "mp4");
-    setSelectOptions("videoEncoderPreset", options.video_encoder_presets, "x264_nvenc");
+    setSelectOptions("videoEncoderPreset", options.video_encoder_presets, "auto");
     setSelectOptions("videoPixelFormat", options.video_pixel_formats, "yuv420p");
     setSelectOptions("audioEncoderPreset", options.audio_encoder_presets, "copy_audio");
     setSelectOptions("subtitleEncoderPreset", options.subtitle_encoder_presets, "copy_subtitle");
@@ -481,12 +516,16 @@ async function loadSupportedOptions() {
 function setSelectOptions(id, values, selected) {
   if (!Array.isArray(values)) return;
   const select = $(id);
+  const current = select.value || "";
+  if (id === "videoEncoderPreset" && !values.includes("auto")) {
+    values = ["auto", ...values];
+  }
   select.innerHTML = "";
   for (const value of values) {
     const option = document.createElement("option");
     option.value = value;
-    option.textContent = value;
-    option.selected = value === selected;
+    option.textContent = value === "auto" ? "Auto (best for container)" : value;
+    option.selected = value === (current || selected);
     select.appendChild(option);
   }
 }
@@ -512,11 +551,21 @@ function safeTag(value) {
 
 function selectedModelTags() {
   const tags = [];
-  const rife = safeTag(resolvedModelDestination("interpolation")) || "rife";
+  const rife = needsInterpolation() ? (safeTag(resolvedModelDestination("interpolation")) || "rife") : "no_rife";
   const upscale = safeTag(resolvedModelDestination("upscaler")) || `${$("contentType").value}_${$("scale").value}x`;
   if (rife) tags.push(rife);
   if (upscale) tags.push(upscale);
   return tags;
+}
+
+function audioFilenameTag() {
+  const selected = $("audioEncoderPreset").value || "copy_audio";
+  if (["copy", "copy_audio", ""].includes(selected)) {
+    return sourceProbe?.audio_codec || "audio_copy";
+  }
+  if (selected === "opus") return "opus";
+  if (selected === "vorbis") return "vorbis";
+  return selected;
 }
 
 function outputResolutionTag() {
@@ -537,7 +586,7 @@ function buildOutputPath(inputPath) {
     fps,
     outputResolutionTag(),
     $("audioBitrate").value || "copy",
-    $("audioEncoderPreset").value || "copy_audio",
+    audioFilenameTag(),
     $("videoEncoderPreset").value || "video",
   ].map(safeTag).filter(Boolean);
   return `${input.dir}${input.name}${tags.map((tag) => `[${tag}]`).join("")}.${container}`;
@@ -545,9 +594,13 @@ function buildOutputPath(inputPath) {
 
 async function startJob(event) {
   event.preventDefault();
-  const request = collectJob();
   try {
+    await loadSourceProbe($("input").value);
+    loadSourcePreview($("input").value);
+    const request = collectJob();
     const job = await api("/api/jobs", { method: "POST", body: JSON.stringify(request) });
+    currentJob = job;
+    startEncodePreview(job.id);
     log(`Job ${job.id}\nStatus: ${job.status}\nCommand: python ${job.args.join(" ")}\n`);
     attachJobEvents(job.id);
   } catch (error) {
@@ -567,6 +620,7 @@ function attachJobEvents(id) {
     jobEvents.addEventListener(type, (message) => {
       jobFinished = true;
       renderJobEvent(JSON.parse(message.data));
+      stopEncodePreview();
       jobEvents.close();
       jobEvents = null;
     });
@@ -583,7 +637,10 @@ function attachJobEvents(id) {
 function renderJobEvent(event) {
   const job = event.job;
   if (!job) return;
-  log([`Job ${job.id}`, `Status: ${job.status}`, ...(job.logs || []), job.error ? `Error: ${job.error}` : ""].filter(Boolean).join("\n"));
+  currentJob = job;
+  renderJobProgress(job);
+  const lines = [`Job ${job.id}`, `Status: ${job.status}`, ...(job.logs || []), job.error ? `Error: ${job.error}` : ""].filter(Boolean);
+  log(lines.slice(-maxVisibleLogLines).join("\n"), true);
 }
 
 async function pollJob(id) {
@@ -594,8 +651,124 @@ async function pollJob(id) {
   }
 }
 
-function log(text) {
-  $("log").textContent = text;
+function log(text, keepScrolled) {
+  const el = $("log");
+  const wasNearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 24;
+  el.textContent = text;
+  if (keepScrolled || wasNearBottom) el.scrollTop = el.scrollHeight;
+}
+
+function renderJobProgress(job) {
+  const parsed = parseFrameProgress(job.logs || []);
+  const etaEl = $("etaValue");
+  const progressEl = $("progressValue");
+  if (!etaEl || !progressEl) return;
+  if (["done", "error", "cancelled"].includes(job.status)) {
+    etaEl.textContent = job.status === "done" ? "Done" : job.status;
+    progressEl.textContent = parsed ? `${parsed.done}/${parsed.total} frames` : `Status: ${job.status}`;
+    return;
+  }
+  if (!parsed || !job.started_at) {
+    etaEl.textContent = job.status || "Running";
+    progressEl.textContent = "Waiting for frame progress…";
+    return;
+  }
+  const started = Date.parse(job.started_at);
+  const elapsed = Number.isFinite(started) ? Math.max(0, (Date.now() - started) / 1000) : 0;
+  const rate = elapsed > 0 ? parsed.done / elapsed : 0;
+  const remaining = rate > 0 ? Math.max(0, (parsed.total - parsed.done) / rate) : 0;
+  const pct = parsed.total > 0 ? Math.min(100, Math.round((parsed.done / parsed.total) * 100)) : 0;
+  etaEl.textContent = remaining > 0 ? formatDuration(remaining) : "Calculating…";
+  progressEl.textContent = `${parsed.done}/${parsed.total} frames · ${pct}% · ${rate.toFixed(2)} fps`;
+}
+
+function parseFrameProgress(logs) {
+  let total = 0;
+  let done = 0;
+  for (const line of logs) {
+    let match = line.match(/output_frames=(\d+)/);
+    if (match) total = Number(match[1]);
+    match = line.match(/wrote\s+(\d+)\/(\d+)\s+frames/);
+    if (match) {
+      done = Number(match[1]);
+      total = Number(match[2]);
+    }
+  }
+  return total > 0 ? { done: Math.max(done, 0), total } : null;
+}
+
+function formatDuration(seconds) {
+  seconds = Math.round(seconds);
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  const s = seconds % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function loadSourcePreview(path) {
+  stopEncodePreview();
+  const video = $("videoPreview");
+  const hint = $("previewHint");
+  path = String(path || "").trim();
+  if (!video || !path) return;
+  if (video.dataset.sourcePath === path) return;
+  video.dataset.sourcePath = path;
+  delete video.dataset.jobId;
+  video.classList.remove("ready");
+  if (hint) hint.textContent = "Loading source stream preview…";
+  video.src = `/api/stream?path=${encodeURIComponent(path)}&t=${Date.now()}`;
+  video.load();
+  video.onloadedmetadata = () => {
+    video.classList.add("ready");
+    if (hint) hint.textContent = "Live preview of the currently selected source stream.";
+  };
+  video.onerror = () => {
+    video.classList.remove("ready");
+    if (hint) hint.textContent = "Source preview could not be opened. The job can still run if the backend can read the file.";
+  };
+}
+
+function startEncodePreview(jobID) {
+  const panel = document.querySelector(".preview-panel");
+  const img = $("encodePreview");
+  const hint = $("previewHint");
+  if (!img || !jobID) return;
+  if (livePreviewTimer) clearInterval(livePreviewTimer);
+  panel?.classList.add("encoding");
+  img.classList.remove("ready");
+  if (hint) hint.textContent = "Waiting for first encoded frame…";
+  const refresh = async () => {
+    try {
+      const response = await fetch(`/api/jobs/${encodeURIComponent(jobID)}/live-preview?t=${Date.now()}`, { cache: "no-store" });
+      if (!response.ok) return;
+      img.src = response.url;
+      img.classList.add("ready");
+      if (hint) hint.textContent = "Live preview of frames being encoded now.";
+    } catch (_) {
+      // Keep the previous frame visible; the next tick can recover.
+    }
+  };
+  refresh();
+  livePreviewTimer = setInterval(refresh, 1000);
+}
+
+function stopEncodePreview() {
+  if (livePreviewTimer) {
+    clearInterval(livePreviewTimer);
+    livePreviewTimer = null;
+  }
+  document.querySelector(".preview-panel")?.classList.remove("encoding");
+}
+
+async function openOutputFolder() {
+  try {
+    const payload = currentJob?.id ? { job: currentJob.id } : { path: buildOutputPath($("input").value) };
+    await api("/api/open-folder", { method: "POST", body: JSON.stringify(payload) });
+  } catch (error) {
+    log(`Open output folder failed: ${error.message}`, true);
+  }
 }
 
 async function quitApp() {
@@ -618,6 +791,9 @@ $("checkBackendBtn").addEventListener("click", runBackendCheck);
 $("installRuntime").addEventListener("click", installRuntime);
 $("quitApp").addEventListener("click", quitApp);
 $("jobForm").addEventListener("submit", startJob);
+$("openOutputFolder").addEventListener("click", openOutputFolder);
+$("input").addEventListener("change", function() { loadSourceProbe(this.value); loadSourcePreview(this.value); });
+$("targetFps").addEventListener("input", updateModelAutoLabels);
 $("openTune").addEventListener("click", () => $("tuneDialog").showModal());
 $("contentType").addEventListener("change", selectBestUpscalerModel);
 $("scale").addEventListener("change", selectBestUpscalerModel);
@@ -756,6 +932,8 @@ function renderFileList(items, isSearch) {
           browseDir(it.path);
         } else {
           $("input").value = it.path;
+          loadSourceProbe(it.path);
+          loadSourcePreview(it.path);
           currentBrowsePath = filepathDir(it.path);
           $("fileBrowserDialog").close();
         }

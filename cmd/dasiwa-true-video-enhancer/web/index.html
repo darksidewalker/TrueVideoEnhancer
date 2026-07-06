@@ -56,20 +56,26 @@
           <label><input type="radio" name="preset" value="best" data-tooltip="preset-best" /> Best</label>
         </div>
 
-        <button class="primary" type="submit" data-tooltip="btn-prepare-job">Prepare Job</button>
+        <div class="run-row">
+          <button class="primary run-button" type="submit" data-tooltip="btn-prepare-job" aria-label="Run job"><span aria-hidden="true">▶</span> Run</button>
+          <button id="openTune" type="button" data-tooltip="btn-open-tune">Advanced Settings</button>
+        </div>
       </form>
 
       <section class="panel preview-panel">
-        <div class="panel-head"><span>02 Preview</span><strong>Neural timeline</strong></div>
-        <div class="timeline" aria-hidden="true">
-          <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+        <div class="panel-head"><span>02 Preview</span><strong>Live source stream</strong></div>
+        <div class="eta-card">
+          <span>ETA</span>
+          <strong id="etaValue">Idle</strong>
+          <small id="progressValue">No active job</small>
         </div>
-        <p>The runtime check and installer use a uv-managed Python environment so system Python dependencies are not modified. Target FPS is passed as the actual target framerate to the backend.</p>
-        <button id="openTune" type="button" data-tooltip="btn-open-tune">Advanced Settings</button>
+        <video id="videoPreview" class="video-preview" controls muted playsinline preload="metadata"></video>
+        <img id="encodePreview" class="encode-preview" alt="Live encode preview" />
+        <p id="previewHint">Select an input video to preview the current source stream. The player stays on the live source while jobs run.</p>
       </section>
 
       <section class="panel jobs-panel">
-        <div class="panel-head"><span>03 Queue</span><strong>Jobs &amp; Logs</strong></div>
+        <div class="panel-head"><span>03 Queue</span><strong>Jobs &amp; Logs</strong><button id="openOutputFolder" type="button" data-tooltip="btn-open-output-folder">Open Output Folder</button></div>
         <pre id="log" data-tooltip="field-log">No job started yet.</pre>
       </section>
     </section>
@@ -85,7 +91,7 @@
       <div class="advanced-grid">
         <label>CRF / CQ base<input id="crf" value="18" inputmode="numeric" data-tooltip="field-crf" /></label>
         <label>CFG scale<input id="cfgScale" type="number" min="0" step="0.1" placeholder="model-supported only" disabled data-tooltip="field-cfg-scale" /></label>
-        <label>NVIDIA/video preset<select id="videoEncoderPreset" data-tooltip="field-video-encoder"><option value="x264_nvenc">H.264 NVENC</option><option value="x265_nvenc">H.265 NVENC</option><option value="av1_nvenc">AV1 NVENC</option><option value="libx264">x264 CPU</option><option value="libx265">x265 CPU</option><option value="prores">ProRes</option></select></label>
+        <label>NVIDIA/video preset<select id="videoEncoderPreset" data-tooltip="field-video-encoder"><option value="auto" selected>Auto (best for container)</option><option value="av1_nvenc">AV1 NVENC</option><option value="x265_nvenc">H.265 NVENC</option><option value="x264_nvenc">H.264 NVENC</option><option value="av1">AV1 CPU</option><option value="libx265">x265 CPU</option><option value="libx264">x264 CPU</option><option value="vp9">VP9</option><option value="prores">ProRes</option></select></label>
         <label>Pixel format<select id="videoPixelFormat" data-tooltip="field-pixel-format"><option value="yuv420p">8-bit 4:2:0</option><option value="yuv420p10le">10-bit 4:2:0</option><option value="yuv444p">8-bit 4:4:4</option><option value="yuv444p10le">10-bit 4:4:4</option></select></label>
         <label>Audio<select id="audioEncoderPreset" data-tooltip="field-audio-encoder"><option value="copy_audio">Copy audio</option><option value="aac">AAC</option><option value="opus">Opus</option><option value="libmp3lame">MP3</option></select></label>
         <label>Audio bitrate<select id="audioBitrate" data-tooltip="field-audio-bitrate"><option value="64k">64 kbps (Mono)</option><option value="96k">96 kbps</option><option value="128k" selected>128 kbps</option><option value="160k">160 kbps</option><option value="192k">192 kbps (Default)</option><option value="256k">256 kbps</option><option value="320k">320 kbps (Max)</option></select></label>

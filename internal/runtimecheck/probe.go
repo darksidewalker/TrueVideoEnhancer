@@ -32,7 +32,7 @@ type InstallOptions struct {
 type ModelChoice struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
-	Category    string `json:"category"` // "upscaler" or "interpolation"
+	Category    string `json:"category"`              // "upscaler" or "interpolation"
 	SubCategory string `json:"subcategory,omitempty"` // upscaler: "anime", "mixed", "realism"; interpolation: ""
 	File        string `json:"file"`
 	URL         string `json:"url"`
@@ -145,7 +145,7 @@ func (p *Probe) PythonCommand() string {
 	if _, err := os.Stat(venvPython); err == nil {
 		return venvPython
 	}
-	
+
 	// Fallback: try to get uv-managed Python (bare, no packages — will fail at import)
 	uv := p.UvCommand()
 	out, err := p.run(context.Background(), uv, "python", "find", "3.12")
@@ -155,7 +155,7 @@ func (p *Probe) PythonCommand() string {
 			return path
 		}
 	}
-	
+
 	// Last resort: system Python (requires installation)
 	for _, candidate := range []string{"python3.13", "python3.12", "python3", "python"} {
 		if _, err := p.lookPath(candidate); err == nil {
@@ -208,12 +208,12 @@ func (p *Probe) bestAvailablePythonVersion() string {
 	if err := p.ensureUvPython("3.12"); err == nil {
 		return "3.12"
 	}
-	
+
 	// Fallback: try uv-managed Python 3.11
 	if err := p.ensureUvPython("3.11"); err == nil {
 		return "3.11"
 	}
-	
+
 	// Ultimate fallback - but this requires system Python
 	for _, cmd := range []string{"python3", "python"} {
 		if path, _ := p.lookPath(cmd); path != "" {
@@ -233,30 +233,30 @@ func (p *Probe) bestAvailablePythonVersion() string {
 // Returns nil if successful, error otherwise.
 func (p *Probe) ensureUvPython(version string) error {
 	uv := p.UvCommand()
-	
+
 	// Install Python via uv if not already installed
 	_, err := p.run(context.Background(), uv, "python", "install", version)
 	if err != nil {
 		return fmt.Errorf("failed to install Python %s via uv: %w", version, err)
 	}
-	
+
 	// Verify installation by finding the exact path
 	out, err := p.run(context.Background(), uv, "python", "find", version)
 	if err != nil {
 		return fmt.Errorf("failed to find Python %s: %w", version, err)
 	}
-	
+
 	path := strings.TrimSpace(string(out))
 	if path == "" {
 		return fmt.Errorf("uv returned empty path for Python %s", version)
 	}
-	
+
 	// Verify the Python binary works
 	_, err = p.run(context.Background(), path, "--version")
 	if err != nil {
 		return fmt.Errorf("Python %s verification failed: %w", version, err)
 	}
-	
+
 	return nil
 }
 
@@ -264,14 +264,14 @@ func (p *Probe) BackendCheck(repoRoot string) BackendCheckResult {
 	result := BackendCheckResult{Timestamp: time.Now().Unix()}
 	pythonCmd := p.PythonCommand()
 	backendScript := filepath.Join(repoRoot, "backend", "rve-backend.py")
-	
+
 	// Check if backend script exists
 	if _, err := os.Stat(backendScript); err != nil {
 		result.Status = "fail"
 		result.Items = append(result.Items, CheckItem{Name: "backend_script", Pass: false, Error: "Backend script not found"})
 		return result
 	}
-	
+
 	// Run backend --list-backends
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -281,16 +281,16 @@ func (p *Probe) BackendCheck(repoRoot string) BackendCheckResult {
 		result.Items = append(result.Items, CheckItem{Name: "python_execution", Pass: false, Error: err.Error()})
 		return result
 	}
-	
+
 	output := strings.TrimSpace(string(out))
 	lines := strings.Split(output, "\n")
-	
+
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" || line == "DaSiWa TrueVideoEnhancer Backends:" || line == strings.Repeat("=", len(line)) {
 			continue
 		}
-		
+
 		checkItem := CheckItem{}
 		if strings.HasPrefix(line, "[✓]") {
 			checkItem.Pass = true
@@ -301,20 +301,20 @@ func (p *Probe) BackendCheck(repoRoot string) BackendCheckResult {
 		} else {
 			continue
 		}
-		
+
 		result.Items = append(result.Items, checkItem)
 		result.TotalCount++
 		if checkItem.Pass {
 			result.PassedCount++
 		}
 	}
-	
+
 	if result.PassedCount == result.TotalCount && result.TotalCount > 0 {
 		result.Status = "ok"
 	} else {
 		result.Status = "fail"
 	}
-	
+
 	return result
 }
 
@@ -394,19 +394,18 @@ func builtInModelChoices(modelsDir string) []ModelChoice {
 
 	files := []struct{ id, name, file, category, subcategory, urlOverride string }{
 		// Anime upscalers (AnimeSharpV4 Fast RCAN for 2x, HAT-L Sharp for 4x)
-		{"anime-sharp-v4-2x", "AnimeSharpV4-Fast RCAN PU 2x",   "2x-AnimeSharpV4_Fast_RCAN_PU.safetensors",      "upscaler", "anime", hfBase + "Kim2091/2x-AnimeSharpV4/resolve/main/2x-AnimeSharpV4_Fast_RCAN_PU.safetensors"},
-		{"hat-l-sharp-4x",    "HAT-L Sharp Anime 4x",            "4xBHI_small_hat-l_sharp.safetensors",          "upscaler", "anime", phhofmBase + "4xBHI_small_hat-l/4xBHI_small_hat-l_sharp.safetensors"},
+		{"anime-sharp-v4-2x", "AnimeSharpV4-Fast RCAN PU 2x", "2x-AnimeSharpV4_Fast_RCAN_PU.safetensors", "upscaler", "anime", hfBase + "Kim2091/2x-AnimeSharpV4/resolve/main/2x-AnimeSharpV4_Fast_RCAN_PU.safetensors"},
+		{"hat-l-sharp-4x", "HAT-L Sharp Anime 4x", "4xBHI_small_hat-l_sharp.safetensors", "upscaler", "anime", phhofmBase + "4xBHI_small_hat-l/4xBHI_small_hat-l_sharp.safetensors"},
 
 		// Mixed content upscalers (UltraSharpV2 — RealPLKSR-lite architecture, general purpose)
-		{"ultrasharpv2-4x","UltraSharpV2-Lite 4x",                   "4x-UltraSharpV2_Lite.safetensors",              "upscaler", "mixed", hfBase + "Kim2091/UltraSharpV2/resolve/main/4x-UltraSharpV2_Lite.safetensors"},
+		{"ultrasharpv2-4x", "UltraSharpV2-Lite 4x", "4x-UltraSharpV2_Lite.safetensors", "upscaler", "mixed", hfBase + "Kim2091/UltraSharpV2/resolve/main/4x-UltraSharpV2_Lite.safetensors"},
 
 		// Realism upscalers (photorealistic / live-action)
-		{"realplksr-gan-2x","RealPLKSR-DySample GAN 2x",    "2xPublic_realplksr_dysample_layernorm_gan.safetensors", "upscaler", "realism", phhofmBase + "2xPublic_realplksr_dysample_layernorm_gan/2xPublic_realplksr_dysample_layernorm_gan.safetensors"},
-		{"hat-l-4x",        "HAT-L Realism 4x",             "4xBHI_small_hat-l.safetensors",            "upscaler", "realism", phhofmBase + "4xBHI_small_hat-l/4xBHI_small_hat-l.safetensors"},
+		{"realplksr-gan-2x", "RealPLKSR-DySample GAN 2x", "2xPublic_realplksr_dysample_layernorm_gan.safetensors", "upscaler", "realism", phhofmBase + "2xPublic_realplksr_dysample_layernorm_gan/2xPublic_realplksr_dysample_layernorm_gan.safetensors"},
+		{"hat-l-4x", "HAT-L Realism 4x", "4xBHI_small_hat-l.safetensors", "upscaler", "realism", phhofmBase + "4xBHI_small_hat-l/4xBHI_small_hat-l.safetensors"},
 
 		// Interpolation models (RIFE v4.26 remains current SOTA for speed-quality balance)
-		{"rife-v4.26",      "RIFE v4.26 General",            "rife_v4.26.safetensors",                  "interpolation", "", hfFrameInterp + "rife_v4.26.safetensors"},
-		{"rife-v4.26-heavy","RIFE v4.26 Heavy Anime",        "rife_v4.26_heavy.safetensors",            "interpolation", "", hfFrameInterp + "rife_v4.26_heavy.safetensors"},
+		{"rife-v4.26", "RIFE v4.26 General", "rife_v4.26.safetensors", "interpolation", "", hfFrameInterp + "rife_v4.26.safetensors"},
 	}
 
 	const rveBase = "https://github.com/TNTwise/real-video-enhancer-models/releases/download/models/"

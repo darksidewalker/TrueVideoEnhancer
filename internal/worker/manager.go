@@ -27,6 +27,8 @@ type Manager struct {
 	subscribers map[string]map[chan Event]struct{}
 }
 
+const maxStoredLogLines = 800
+
 type Event struct {
 	Type string `json:"type"`
 	Job  *Job   `json:"job"`
@@ -37,6 +39,7 @@ type Job struct {
 	ID        string    `json:"id"`
 	Input     string    `json:"input"`
 	Output    string    `json:"output"`
+	Preview   string    `json:"preview,omitempty"`
 	Status    string    `json:"status"`
 	StartedAt time.Time `json:"started_at"`
 	EndedAt   time.Time `json:"ended_at,omitempty"`
@@ -94,8 +97,10 @@ func (m *Manager) Start(req Request) (*Job, error) {
 	if err := validateRequest(req); err != nil {
 		return nil, err
 	}
-	args := m.buildArgs(req)
-	job := &Job{ID: newID(), Input: req.Input, Output: req.Output, Status: "queued", StartedAt: time.Now(), Args: args}
+	jobID := newID()
+	previewDir := filepath.Join(os.TempDir(), "dasiwa-live-preview", jobID)
+	args := m.buildArgs(req, previewDir)
+	job := &Job{ID: jobID, Input: req.Input, Output: req.Output, Preview: previewDir, Status: "queued", StartedAt: time.Now(), Args: args}
 
 	m.mu.Lock()
 	m.jobs[job.ID] = job
@@ -168,7 +173,7 @@ func (m *Manager) Cancel(id string) error {
 
 func (m *Manager) run(ctx context.Context, id string, args []string) {
 	m.setStatus(id, "running")
-	
+
 	// Use venv python if available
 	pythonPath := m.cfg.Python
 	if m.cfg.VenvDir != "" {
@@ -177,7 +182,7 @@ func (m *Manager) run(ctx context.Context, id string, args []string) {
 			pythonPath = venvPython
 		}
 	}
-	
+
 	cmd := exec.CommandContext(ctx, pythonPath, args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -204,12 +209,15 @@ func (m *Manager) run(ctx context.Context, id string, args []string) {
 	m.finish(id, "done", "")
 }
 
-func (m *Manager) buildArgs(req Request) []string {
+func (m *Manager) buildArgs(req Request, previewDir string) []string {
 	backend := req.Backend
 	if backend == "" {
 		backend = "tensorrt"
 	}
 	args := []string{m.cfg.BackendScript, "--input", req.Input, "--output", req.Output, "--backend", backend, "--overwrite"}
+	if previewDir != "" {
+		args = append(args, "--preview_dir", previewDir)
+	}
 	if req.Scale > 0 {
 		args = append(args, "--scale", strconv.Itoa(req.Scale))
 	}
@@ -377,6 +385,9 @@ func (m *Manager) appendLog(id, line string) {
 	m.mu.Lock()
 	if job := m.jobs[id]; job != nil {
 		job.Logs = append(job.Logs, line)
+		if len(job.Logs) > maxStoredLogLines {
+			job.Logs = append([]string(nil), job.Logs[len(job.Logs)-maxStoredLogLines:]...)
+		}
 		event = Event{Type: "log", Job: cloneJob(job), Line: line}
 	}
 	m.mu.Unlock()
