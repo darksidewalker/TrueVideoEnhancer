@@ -116,6 +116,15 @@ function populateModelDropdown(selectID, category, autoLabel) {
   if (!select) return;
   const current = select.value || "";
   select.innerHTML = "";
+  
+  // Add "No upscale" option first (only for upscaler)
+  if (category === "upscaler") {
+    const noUpscale = document.createElement("option");
+    noUpscale.value = "__no_upscale__";
+    noUpscale.textContent = "No upscale";
+    select.appendChild(noUpscale);
+  }
+  
   const auto = document.createElement("option");
   auto.value = "";
   auto.textContent = autoLabel;
