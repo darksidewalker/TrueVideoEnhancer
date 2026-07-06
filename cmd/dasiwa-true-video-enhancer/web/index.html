@@ -17,10 +17,10 @@
       <div class="status-card">
         <span id="statusDot" class="dot"></span>
         <strong id="runtimeSummary">Checking runtime…</strong>
-        <button id="checkBackendBtn" type="button">Check Backend</button>
-        <button id="installRuntime" type="button">Install Runtime</button>
-        <button id="openModelsBtn" type="button">Models</button>
-        <button id="quitApp" class="danger" type="button">Quit</button>
+        <button id="checkBackendBtn" type="button" data-tooltip="btn-check-backend" title="Run Diagnostics">Check Backend</button>
+        <button id="installRuntime" type="button" data-tooltip="btn-install-runtime" title="Install Runtime">Install Runtime</button>
+        <button id="openModelsBtn" type="button" data-tooltip="btn-open-models" title="Manage Models">Models</button>
+        <button id="quitApp" class="danger" type="button" data-tooltip="btn-quit" title="Quit Application">Quit</button>
       </div>
     </header>
 
@@ -34,29 +34,29 @@
         <!-- Input text field + browse button -->
         <div class="input-with-btn">
           <span style="color:var(--muted);font-weight:600;">Input video</span>
-          <input id="input" required placeholder="/full/path/to/video.mkv — or use the folder icon to browse" />
-          <button type="button" id="browseInput" title="Browse local files">📂</button>
+          <input id="input" required placeholder="/full/path/to/video.mkv — or use the folder icon to browse" data-tooltip="field-input" />
+          <button type="button" id="browseInput" data-tooltip="btn-browse" title="Browse local files">📂</button>
         </div>
 
         <!-- Container + FPS/Scale -->
         <div class="field-row">
-          <label>Content type <select id="contentType"><option value="anime">Anime</option><option value="mixed" selected>Mixed</option><option value="realism">Realism</option></select></label>
-          <label>Container <select id="outputContainer"><option value="mp4" selected>MP4</option><option value="mkv">MKV</option><option value="webm">WebM</option><option value="mov">MOV</option><option value="avi">AVI</option><option value="flv">FLV</option><option value="ts">MPEG-TS</option><option value="m4v">M4V</option></select></label>
+          <label>Content type<select id="contentType" data-tooltip="field-content-type"><option value="anime">Anime</option><option value="mixed" selected>Mixed</option><option value="realism">Realism</option></select></label>
+          <label>Container<select id="outputContainer" data-tooltip="field-output-container"><option value="mp4" selected>MP4</option><option value="mkv">MKV</option><option value="webm">WebM</option><option value="mov">MOV</option><option value="avi">AVI</option><option value="flv">FLV</option><option value="ts">MPEG-TS</option><option value="m4v">M4V</option></select></label>
         </div>
 
         <div class="field-row">
-          <label>Target FPS <input id="targetFps" type="number" min="0" step="0.001" value="60" /></label>
-          <label>Scale <select id="scale"><option value="1">1x</option><option value="2" selected>2x</option><option value="4">4x</option></select></label>
+          <label>Target FPS<input id="targetFps" type="number" min="0" step="0.001" value="60" data-tooltip="field-target-fps" /></label>
+          <label>Scale<select id="scale" data-tooltip="field-scale"><option value="1">1x</option><option value="2" selected>2x</option><option value="4">4x</option></select></label>
         </div>
 
         <!-- Preset -->
         <div class="field-row segmented" role="radiogroup" aria-label="Preset">
-          <label><input type="radio" name="preset" value="fast" /> Fast</label>
-          <label><input type="radio" name="preset" value="balanced" checked /> Balanced</label>
-          <label><input type="radio" name="preset" value="best" /> Best</label>
+          <label><input type="radio" name="preset" value="fast" data-tooltip="preset-fast" /> Fast</label>
+          <label><input type="radio" name="preset" value="balanced" checked data-tooltip="preset-balanced" /> Balanced</label>
+          <label><input type="radio" name="preset" value="best" data-tooltip="preset-best" /> Best</label>
         </div>
 
-        <button class="primary" type="submit">Prepare Job</button>
+        <button class="primary" type="submit" data-tooltip="btn-prepare-job">Prepare Job</button>
       </form>
 
       <section class="panel preview-panel">
@@ -65,12 +65,12 @@
           <i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i>
         </div>
         <p>The runtime check and installer use a uv-managed Python environment so system Python dependencies are not modified. Target FPS is passed as the actual target framerate to the backend.</p>
-        <button id="openTune" type="button">Advanced Settings</button>
+        <button id="openTune" type="button" data-tooltip="btn-open-tune">Advanced Settings</button>
       </section>
 
       <section class="panel jobs-panel">
-        <div class="panel-head"><span>03 Queue</span><strong>Jobs & Logs</strong></div>
-        <pre id="log">No job started yet.</pre>
+        <div class="panel-head"><span>03 Queue</span><strong>Jobs &amp; Logs</strong></div>
+        <pre id="log" data-tooltip="field-log">No job started yet.</pre>
       </section>
     </section>
   </main>
@@ -79,51 +79,51 @@
     <form method="dialog" class="drawer">
       <div class="panel-head"><span>Advanced</span><strong>Advanced Settings</strong><button type="button" id="closeDialogX" title="Close" aria-label="Close" style="background:none;border:0;color:var(--muted);font-size:24px;line-height:1;cursor:pointer;padding:4px 8px;margin-left:auto;">✕</button></div>
       <p class="hint">Only options supported by the selected backend/model are passed to the worker. CFG remains reserved until a model explicitly supports it.</p>
-      <label>Backend <select id="backend"><option value="tensorrt">TensorRT</option><option value="pytorch">PyTorch CUDA fallback</option></select></label>
-      <label>RIFE safetensors <select id="rifeModel"><option value="">Auto (content/preset)</option></select></label>
-      <label>Upscale model <select id="upscaleModel"><option value="">Auto (content/scale/preset)</option></select></label>
+      <label>Backend<select id="backend" data-tooltip="field-backend"><option value="tensorrt">TensorRT</option><option value="pytorch">PyTorch CUDA fallback</option></select></label>
+      <label>RIFE safetensors<select id="rifeModel" data-tooltip="field-rife-model"><option value="">Auto (content/preset)</option></select></label>
+      <label>Upscale model<select id="upscaleModel" data-tooltip="field-upscale-model"><option value="">Auto (content/scale/preset)</option></select></label>
       <div class="advanced-grid">
-        <label>CRF / CQ base <input id="crf" value="18" inputmode="numeric" /></label>
-        <label>CFG scale <input id="cfgScale" type="number" min="0" step="0.1" placeholder="model-supported only" disabled /></label>
-        <label>NVIDIA/video preset <select id="videoEncoderPreset"><option value="x264_nvenc">H.264 NVENC</option><option value="x265_nvenc">H.265 NVENC</option><option value="av1_nvenc">AV1 NVENC</option><option value="libx264">x264 CPU</option><option value="libx265">x265 CPU</option><option value="prores">ProRes</option></select></label>
-        <label>Pixel format <select id="videoPixelFormat"><option value="yuv420p">8-bit 4:2:0</option><option value="yuv420p10le">10-bit 4:2:0</option><option value="yuv444p">8-bit 4:4:4</option><option value="yuv444p10le">10-bit 4:4:4</option></select></label>
-        <label>Audio <select id="audioEncoderPreset"><option value="copy_audio">Copy audio</option><option value="aac">AAC</option><option value="opus">Opus</option><option value="libmp3lame">MP3</option></select></label>
-        <label>Audio bitrate <select id="audioBitrate"><option value="64k">64 kbps (Mono)</option><option value="96k">96 kbps</option><option value="128k" selected>128 kbps</option><option value="160k">160 kbps</option><option value="192k">192 kbps (Default)</option><option value="256k">256 kbps</option><option value="320k">320 kbps (Max)</option></select></label>
-        <label>Subtitles <select id="subtitleEncoderPreset"><option value="copy_subtitle">Copy subtitle</option><option value="srt">SRT</option><option value="ass">ASS</option><option value="webvtt">WebVTT</option></select></label>
-        <label>Tile size <input id="tileSize" type="number" min="0" step="16" value="0" /></label>
-        <label>TensorRT profile <select id="tensorrtOptProfile"><option value="1">1 fastest build</option><option value="2">2 fast</option><option value="3" selected>3 balanced</option><option value="4">4 quality</option><option value="5">5 best</option></select></label>
-        <label>Scene detect <select id="sceneDetectMethod"><option value="pyscenedetect">PySceneDetect</option><option value="mean">Mean</option><option value="mean_segmented">Mean segmented</option><option value="none">None</option></select></label>
-        <label>Scene threshold <input id="sceneDetectThreshold" type="number" min="0" step="0.1" value="4" /></label>
-        <label>Override upscale scale <input id="overrideUpscaleScale" type="number" min="0" step="1" placeholder="optional" /></label>
+        <label>CRF / CQ base<input id="crf" value="18" inputmode="numeric" data-tooltip="field-crf" /></label>
+        <label>CFG scale<input id="cfgScale" type="number" min="0" step="0.1" placeholder="model-supported only" disabled data-tooltip="field-cfg-scale" /></label>
+        <label>NVIDIA/video preset<select id="videoEncoderPreset" data-tooltip="field-video-encoder"><option value="x264_nvenc">H.264 NVENC</option><option value="x265_nvenc">H.265 NVENC</option><option value="av1_nvenc">AV1 NVENC</option><option value="libx264">x264 CPU</option><option value="libx265">x265 CPU</option><option value="prores">ProRes</option></select></label>
+        <label>Pixel format<select id="videoPixelFormat" data-tooltip="field-pixel-format"><option value="yuv420p">8-bit 4:2:0</option><option value="yuv420p10le">10-bit 4:2:0</option><option value="yuv444p">8-bit 4:4:4</option><option value="yuv444p10le">10-bit 4:4:4</option></select></label>
+        <label>Audio<select id="audioEncoderPreset" data-tooltip="field-audio-encoder"><option value="copy_audio">Copy audio</option><option value="aac">AAC</option><option value="opus">Opus</option><option value="libmp3lame">MP3</option></select></label>
+        <label>Audio bitrate<select id="audioBitrate" data-tooltip="field-audio-bitrate"><option value="64k">64 kbps (Mono)</option><option value="96k">96 kbps</option><option value="128k" selected>128 kbps</option><option value="160k">160 kbps</option><option value="192k">192 kbps (Default)</option><option value="256k">256 kbps</option><option value="320k">320 kbps (Max)</option></select></label>
+        <label>Subtitles<select id="subtitleEncoderPreset" data-tooltip="field-subtitle-encoder"><option value="copy_subtitle">Copy subtitle</option><option value="srt">SRT</option><option value="ass">ASS</option><option value="webvtt">WebVTT</option></select></label>
+        <label>Tile size<input id="tileSize" type="number" min="0" step="16" value="0" data-tooltip="field-tile-size" /></label>
+        <label>TensorRT profile<select id="tensorrtOptProfile" data-tooltip="field-tensorrt-profile"><option value="1">1 fastest build</option><option value="2">2 fast</option><option value="3" selected>3 balanced</option><option value="4">4 quality</option><option value="5">5 best</option></select></label>
+        <label>Scene detect<select id="sceneDetectMethod" data-tooltip="field-scene-detect"><option value="pyscenedetect">PySceneDetect</option><option value="mean">Mean</option><option value="mean_segmented">Mean segmented</option><option value="none">None</option></select></label>
+        <label>Scene threshold<input id="sceneDetectThreshold" type="number" min="0" step="0.1" value="4" data-tooltip="field-scene-threshold" /></label>
+        <label>Override upscale scale<input id="overrideUpscaleScale" type="number" min="0" step="1" placeholder="optional" data-tooltip="field-override-upscale-scale" /></label>
       </div>
       <div class="switch-grid">
-        <label class="toggle"><input id="tensorrtDynamicShapes" type="checkbox" /> TensorRT dynamic shapes</label>
-        <label class="toggle"><input id="hdrMode" type="checkbox" /> HDR colorspace mode</label>
-        <label class="toggle"><input id="uhdMode" type="checkbox" /> UHD/8K VRAM saver</label>
-        <label class="toggle"><input id="sloMoMode" type="checkbox" /> Slomo Mode (Lengthen video)</label>
-        <label class="toggle"><input id="ensemble" type="checkbox" /> Ensemble if supported</label>
-        <label class="toggle"><input id="dynamicOpticalFlow" type="checkbox" /> Dynamic optical flow</label>
+        <label class="toggle"><input id="tensorrtDynamicShapes" type="checkbox" data-tooltip="toggle-tensorrt-dynamic-shapes" /> TensorRT dynamic shapes</label>
+        <label class="toggle"><input id="hdrMode" type="checkbox" data-tooltip="toggle-hdr-mode" /> HDR colorspace mode</label>
+        <label class="toggle"><input id="uhdMode" type="checkbox" data-tooltip="toggle-uhd-mode" /> UHD/8K VRAM saver</label>
+        <label class="toggle"><input id="sloMoMode" type="checkbox" data-tooltip="toggle-slomo-mode" /> Slomo Mode (Lengthen video)</label>
+        <label class="toggle"><input id="ensemble" type="checkbox" data-tooltip="toggle-ensemble" /> Ensemble if supported</label>
+        <label class="toggle"><input id="dynamicOpticalFlow" type="checkbox" data-tooltip="toggle-dynamic-optical-flow" /> Dynamic optical flow</label>
       </div>
       <div class="field-row">
-        <label><span style="color:var(--muted)">Device</span> <select id="deviceSelect"><option value="">Auto (default)</option><option value="cuda">CUDA</option><option value="mps">MPS</option><option value="xpu">XPU</option></select></label>
-        <label>Benchmark Mode <input type="checkbox" id="benchmarkMode" /></label>
+        <label><span style="color:var(--muted)">Device<select id="deviceSelect" data-tooltip="field-device"><option value="">Auto (default)</option><option value="cuda">CUDA</option><option value="mps">MPS</option><option value="xpu">XPU</option></select></span></label>
+        <label>Benchmark Mode<input type="checkbox" id="benchmarkMode" data-tooltip="toggle-benchmark-mode" /></label>
       </div>
       <div class="field-row">
-        <label>Start time (sec) <input id="startTime" type="number" min="0" step="0.1" value="" placeholder="optional" /></label>
-        <label>End time (sec) <input id="endTime" type="number" min="0" step="0.1" value="" placeholder="optional" /></label>
+        <label>Start time (sec)<input id="startTime" type="number" min="0" step="0.1" value="" placeholder="optional" data-tooltip="field-start-time" /></label>
+        <label>End time (sec)<input id="endTime" type="number" min="0" step="0.1" value="" placeholder="optional" data-tooltip="field-end-time" /></label>
       </div>
       <div class="field-row">
-        <label>PyTorch GPU ID <input id="pytorchGpuId" type="number" min="0" value="0" /></label>
-        <label>NCNN GPU ID <input id="ncnnGpuId" type="number" min="0" value="0" /></label>
+        <label>PyTorch GPU ID<input id="pytorchGpuId" type="number" min="0" value="0" data-tooltip="field-pytorch-gpu-id" /></label>
+        <label>NCNN GPU ID<input id="ncnnGpuId" type="number" min="0" value="0" data-tooltip="field-ncnn-gpu-id" /></label>
       </div>
-      <label>Custom encoder args <input id="customEncoder" placeholder="expert only, overrides preset" /></label>
-      <label class="toggle"><input id="dryRun" type="checkbox" /> Dry-run only (build command without executing)</label>
+      <label>Custom encoder args<input id="customEncoder" placeholder="expert only, overrides preset" data-tooltip="field-custom-encoder" /></label>
+      <label class="toggle"><input id="dryRun" type="checkbox" data-tooltip="toggle-dry-run" /> Dry-run only (build command without executing)</label>
       <p class="warning">Offline bundle remains blocked until fully installable and verifiable. Unsupported custom model architectures are blocked.</p>
     </form>
   </dialog>
 
   <!-- Backend Check Dialog -->
-  <dialog id="checkDialog">
+  <dialog id="checkDialog" data-tooltip="dialog-check">
     <div class="drawer check-drawer">
       <div class="panel-head"><span>Diagnostics</span><strong>Backend Status</strong><button type="button" id="closeCheckX" title="Close" aria-label="Close" style="background:none;border:0;color:var(--muted);font-size:24px;line-height:1;cursor:pointer;padding:4px 8px;margin-left:auto;">✕</button></div>
       <p class="hint">Runs the Python backend with --list-backends to detect all available components.</p>
@@ -132,7 +132,7 @@
   </dialog>
 
   <!-- Models Dialog -->
-  <dialog id="modelsDialog">
+  <dialog id="modelsDialog" data-tooltip="dialog-models">
     <div class="drawer model-drawer">
       <div class="panel-head"><span>Models</span><strong>Manage Models</strong><button type="button" id="closeModelsX" title="Close" aria-label="Close" style="background:none;border:0;color:var(--muted);font-size:24px;line-height:1;cursor:pointer;padding:4px 8px;margin-left:auto;">✕</button></div>
       <p class="hint">Check which models are already downloaded or download them.</p>
@@ -141,7 +141,7 @@
   </dialog>
 
   <!-- File Browser Dialog -->
-  <dialog id="fileBrowserDialog">
+  <dialog id="fileBrowserDialog" data-tooltip="dialog-file-browser">
     <div class="drawer model-drawer">
       <div class="panel-head"><span>Browse</span><strong>Select Video File</strong><button type="button" id="closeFileBrowserX" title="Close" aria-label="Close" style="background:none;border:0;color:var(--muted);font-size:24px;line-height:1;cursor:pointer;padding:4px 8px;margin-left:auto;">✕</button></div>
       <p class="hint">Browse local directories to find video files. Click a file to select it.</p>
@@ -152,13 +152,15 @@
   </dialog>
 
   <!-- Download Progress Dialog -->
-  <dialog id="downloadDialog">
+  <dialog id="downloadDialog" data-tooltip="dialog-download">
     <div class="drawer check-drawer">
       <div class="panel-head"><span>Download</span><strong>Downloading Models…</strong></div>
       <pre id="downloadLog" style="max-height:50vh;overflow:auto;">Starting download…</pre>
     </div>
   </dialog>
 
+  <!-- Tooltip module (must load BEFORE app.js) -->
+  <script src="/tooltips.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>
