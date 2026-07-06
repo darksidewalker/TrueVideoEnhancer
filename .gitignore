@@ -33,7 +33,7 @@ uploads/
 *.png
 *.jpg
 *.jpeg
-*.webp
+!assets/*.webp
 take_screenshot.py
 *_screenshot*.py
 
