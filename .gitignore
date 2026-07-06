@@ -28,3 +28,24 @@ Thumbs.db
 
 # Uploads
 uploads/
+
+# Screenshots / test captures
+*.png
+*.jpg
+*.jpeg
+*.webp
+take_screenshot.py
+*_screenshot*.py
+
+# Temporary / scratch files
+*.tmp
+*.bak
+*.orig
+*.swp
+*.swo
+~$*
+*.lock
+
+# Jupyter notebooks (scratch work)
+.ipynb_checkpoints/
+*.ipynb
