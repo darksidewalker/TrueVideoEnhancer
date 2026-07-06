@@ -1,5 +1,6 @@
-# Binary
-dasiwa-true-video-enhancer
+# Compiled binary (root-only, not under cmd/)
+/dasiwa-true-video-enhancer
+bin/dasiwa-true-video-enhancer
 
 # Python cache
 __pycache__/

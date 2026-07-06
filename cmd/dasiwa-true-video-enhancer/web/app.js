@@ -737,10 +737,21 @@ function estimateFileSize() {
     : 1;
   
   const scale = Number($("overrideUpscaleScale").value || $("scale").value || 1);
-  const resolutionFactor = (scale * scale); // Fläche skaliert quadratisch
+  const resolutionFactor = (scale * scale);
   
   const crf = Number($("crf")?.value || 23);
-  const crfFactor = Math.pow(2, (23 - crf) / 6); // CRF 23 = baseline, ±6 = Faktor 2
+  const crfFactor = Math.pow(2, (23 - crf) / 6);
+  
+  // Content-Type-Faktor: Anime/AI-generierter Content komprimiert deutlich besser
+  // als Live-Action-Material (glätte Gradienten, wenig High-Frequency-Detail)
+  const contentType = $("contentType")?.value || "mixed";
+  let contentFactor = 1.0;
+  if (contentType === "anime") {
+    contentFactor = 0.4; // Anime/AI: sehr effiziente Kompression
+  } else if (contentType === "mixed") {
+    contentFactor = 0.6; // Gemischt: moderate Verbesserung
+  }
+  // "realism" bleibt bei 1.0
   
   let codecFactor = 1.0;
   const encoder = $("videoEncoderPreset")?.value || "auto";
@@ -751,7 +762,7 @@ function estimateFileSize() {
       break;
     case "av1":
     case "av1_nvenc":
-      codecFactor = 0.6; // ~40% kleiner als H.264
+      codecFactor = 0.4; // ~60% kleiner als H.264
       break;
     case "prores":
       codecFactor = 10.0; // Sehr große Dateien
@@ -760,9 +771,11 @@ function estimateFileSize() {
       codecFactor = 1.0;
   }
 
-  // Base rate: ~10 MB/min at 1080p, CRF 23, H.264
-  const baseMBPerMin = 10;
-  const estimatedMB = baseMBPerMin * durationMinutes * fpsRatio * resolutionFactor * crfFactor * codecFactor;
+  // NEUE Baseline: ~2 MB/min bei 1080p, CRF 23, H.264
+  // Kalibriert an typischen AI-Generated-Videos (LTX-2.3 etc.)
+  // Live-Action wird überschätzt (~2-3x zu hoch)
+  const baseMBPerMin = 2;
+  const estimatedMB = baseMBPerMin * durationMinutes * fpsRatio * resolutionFactor * crfFactor * codecFactor * contentFactor;
   
   if (estimatedMB < 1024) {
     return { size: `${Math.round(estimatedMB)} MB`, details: `~${Math.round(estimatedMB)} MB` };
