@@ -2,6 +2,8 @@
 
 **NVIDIA-first video restoration studio.** One-page Go shell for RIFE safetensors, TensorRT upscaling, denoise, and target-FPS smoothing.
 
+![DaSiWa True Video Enhancer Preview](assets/preview.webp)
+
 ---
 
 ## Table of Contents
@@ -9,6 +11,7 @@
 - [Overview](#overview)
 - [Architecture](#architecture)
 - [Quick Start](#quick-start)
+- [Features](#features)
 - [UI Reference](#ui-reference)
   - [Source Panel (01)](#source-panel-01)
   - [Preview Panel (02)](#preview-panel-02)
@@ -34,6 +37,10 @@ DaSiWa True Video Enhancer is a hybrid application: a **Go web frontend** that o
 - Denoise and restore degraded footage
 - Smooth motion via target-FPS generation
 - Encode output with hardware-accelerated codecs (NVENC)
+- Apply intelligent multi-pass smart upscaling with RTX VFX
+- Stream live encode previews in real-time
+- Manage AI models with automatic downloads
+- Browse local video files with search functionality
 
 The app runs as a standalone web server. Open the URL in any modern browser to access the full studio.
 
@@ -53,6 +60,8 @@ The app runs as a standalone web server. Open the URL in any modern browser to a
 │   • Static file serving                      │
 │   • REST API (/api/*)                        │
 │   • SSE streaming (/stream)                  │
+│   • Live preview streaming                   │
+│   • File browser                             │
 └──────────────┬──────────────────────────────┘
                │ subprocess (python)
 ┌──────────────▼──────────────────────────────┐
@@ -61,6 +70,8 @@ The app runs as a standalone web server. Open the URL in any modern browser to a
 │   • FFmpeg encoding                          │
 │   • Scene detection (PySceneDetect)          │
 │   • Model management                         │
+│   • RTX upscale pipeline                     │
+│   • Live preview frame emission              │
 └─────────────────────────────────────────────┘
 ```
 
@@ -70,6 +81,9 @@ The app runs as a standalone web server. Open the URL in any modern browser to a
 - **GPU-first**: Optimized for NVIDIA GPUs with CUDA/TensorRT acceleration
 - **Fallback support**: PyTorch CPU/CUDA works when TensorRT is unavailable
 - **Cross-platform**: Works on Linux, Windows, macOS (with appropriate drivers)
+- **Live preview**: Real-time base64-encoded JPEG frames streamed from Python to Go to browser
+- **Portable runtime**: Self-contained Python environment managed by uv
+- **Intelligent upscaling**: Multi-pass RTX VFX pipeline with automatic model selection
 
 ---
 
@@ -96,14 +110,53 @@ go build -o dasiwa-true-video-enhancer ./cmd/dasiwa-true-video-enhancer
 ./dasiwa-true-video-enhancer
 ```
 
-The server starts at `http://localhost:8080`. On first run, click **Install Runtime** in the UI to set up the Python environment.
+The server starts at `http://localhost:8612`. On first run, click **Install Runtime** in the UI to set up the Python environment.
 
 ### Docker Deployment
 
 ```bash
 docker build -t da-si-wa-tve .
-docker run --gpus all -p 8080:8080 da-si-wa-tve
+docker run --gpus all -p 8080:8612 da-si-wa-tve
 ```
+
+---
+
+## Features
+
+### Core Capabilities
+
+- **Video Upscaling**: 2× and 4× resolution enhancement with auto-selected models per content type
+- **Frame Interpolation**: RIFE optical flow network for smooth motion (target FPS generation)
+- **Hardware Encoding**: NVENC GPU-accelerated encoding (H.264, H.265, AV1)
+- **Multi-Container Support**: MP4, MKV, WebM, MOV, AVI, FLV, MPEG-TS, M4V
+- **Audio/Subtitle Handling**: Copy, AAC, Opus, MP3, SRT, ASS, WebVTT
+- **Smart Upscaling Pipeline**: Intelligent multi-pass RTX VFX with Lanczos fallback
+- **Live Preview**: Real-time encode preview during processing
+- **File Browser**: Navigate local directories to select videos
+- **Model Management**: Automatic download and management of AI models
+- **Scene Detection**: PySceneDetect integration for scene-aware processing
+- **HDR Mode**: Preserve high-dynamic-range color through the pipeline
+- **Slomo Mode**: Lengthen video by inserting interpolated frames
+- **Ensemble Processing**: Multiple inference passes for higher quality
+- **Dynamic Optical Flow**: Per-frame adaptive flow estimation
+- **Benchmark Mode**: Timing metrics for hardware comparison
+- **Dry-Run**: Build command without executing (safe testing)
+- **Segment Selection**: Process only specific time ranges (start/end time)
+- **Device Selection**: CUDA, MPS (Apple Silicon), XPU (Intel Arc)
+- **VRAM Optimization**: UHD/8K VRAM saver for ultra-high resolutions
+- **Custom Encoder Args**: Expert override for FFmpeg flags
+- **Auto Fallback**: Automatically selects best available encoder per container
+
+### Technical Highlights
+
+- **SSE Streaming**: Real-time progress updates via Server-Sent Events
+- **Base64 Frame Protocol**: Cross-process signaling between Go worker and Python subprocess
+- **Portable Runtime**: uv-managed Python 3.12 environment, no system dependencies
+- **Health Checks**: Application health monitoring endpoint
+- **Backend Diagnostics**: Comprehensive component checking (`--list-backends`)
+- **Tooltip System**: Centralized tooltip dictionary with i18n support
+- **localStorage Persistence**: User preferences saved across sessions
+- **Cookie-Based State**: Last browsed directory path persisted
 
 ---
 
@@ -144,6 +197,8 @@ Live feed of job progress. Shows:
 - Job ID and status (queued, running, done, error, cancelled)
 - Real-time log output from the backend
 - Error messages with context
+- ETA and estimated file size
+- Open output folder button
 
 ### Advanced Settings
 
@@ -187,6 +242,7 @@ Opens a comprehensive configuration dialog with grouped sections:
 | **Dynamic optical flow** | Per-frame adaptive flow estimation. Better motion quality, slower processing. |
 | **Benchmark Mode** | Reports timing metrics. Useful for comparing hardware configurations. |
 | **Dry-run only** | Builds and displays the command without executing. Safe for testing. |
+| **RTX Upscale** | Enable intelligent multi-pass smart upscaling with RTX VFX |
 
 #### Device & Timing
 
@@ -205,18 +261,21 @@ Opens a comprehensive configuration dialog with grouped sections:
 Three quality tiers balance speed against output quality:
 
 ### Fast ⚡
+
 - **Use case:** Quick previews, low-end hardware, batch processing
 - **Behavior:** Uses lower-tier models, skips ensemble passes, minimal post-processing
 - **Speed:** ~3–5× faster than Balanced
 - **Quality:** Good enough for rough cuts and previews
 
 ### Balanced ⚖️ *(Default)*
+
 - **Use case:** General-purpose processing, most content types
 - **Behavior:** Standard model selections, single-pass inference, balanced encoding
 - **Speed:** Baseline reference point
 - **Quality:** Strong results for most use cases
 
 ### Best 🏆
+
 - **Use case:** Final delivery, archival, professional output
 - **Behavior:** Highest-tier models, ensemble passes, dynamic optical flow, aggressive denoising
 - **Speed:** ~2–3× slower than Balanced
@@ -319,18 +378,27 @@ The Go server exposes these endpoints:
 
 | Method | Path | Description |
 |--------|------|-------------|
+| GET | `/api/health` | Application health check |
+| GET | `/api/options` | Supported encoder/container options |
 | GET | `/api/runtime/status` | Python + GPU availability |
 | POST | `/api/runtime/check` | Full diagnostic report |
-| POST | `/api/runtime/install/stream` | Install progress (SSE) |
+| POST | `/api/runtime/install` | Install runtime (blocking) |
+| GET | `/api/runtime/install/stream` | Install progress (SSE) |
 | GET | `/api/runtime/models` | Available AI models |
-| GET | `/api/options` | Supported encoder/container options |
 | POST | `/api/jobs` | Submit a new job |
 | GET | `/api/jobs/:id` | Get job status |
 | GET | `/api/jobs/:id/events` | Live job events (SSE) |
+| GET | `/api/jobs/:id/live-preview` | Live encode preview (JPEG) |
+| GET | `/api/jobs/:id/preview` | Post-job preview (MP4) |
+| POST | `/api/jobs/:id/cancel` | Cancel running job |
 | GET | `/api/browse?path=` | Directory listing |
 | GET | `/api/search-files?q=&path=` | File search |
+| POST | `/api/open-folder` | Open output folder |
 | POST | `/api/quit` | Graceful shutdown |
 | GET | `/api/models/download/stream?models=` | Model download (SSE) |
+| POST | `/api/models/download` | Model download (blocking) |
+| GET | `/api/probe` | Probe video file info |
+| GET | `/api/stream?path=` | Stream raw video file |
 
 ---
 
@@ -340,7 +408,7 @@ The Go server exposes these endpoints:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `8080` | Web server listen port |
+| `PORT` | `8612` | Web server listen port |
 | `HOME_DIR` | OS default | File browser root directory |
 | `PYTHON_PATH` | Auto-detected | Override Python interpreter path |
 | `UV_PATH` | Auto-detected | Override uv binary path |
@@ -367,15 +435,16 @@ User preferences (selected models, last browse path) are stored in:
 | Slow processing | Try **Fast** preset or switch from TensorRT to PyTorch CPU for debugging |
 | Black output frames | Check CRF value (try 18–22), verify pixel format matches source |
 | Audio issues | Ensure audio encoder supports your source format (copy_audio safest) |
+| No live preview | Check that backend is properly installed and GPU is accessible |
 
 ### Diagnostic Commands
 
 ```bash
 # Check backend components
-curl http://localhost:8080/api/runtime/check
+curl http://localhost:8612/api/runtime/check
 
 # List available models
-curl http://localhost:8080/api/runtime/models
+curl http://localhost:8612/api/runtime/models
 
 # Test FFmpeg
 ffmpeg -version
@@ -398,9 +467,19 @@ DaSiWa-TrueVideoEnhancer/
 │       ├── index.html        # Single-page UI
 │       ├── app.js            # Frontend logic (jobs, API, file browser)
 │       ├── tooltips.js       # Tooltip & translation module
-│       └── style.css         # Dark theme styling
+│       ├── style.css         # Dark theme styling
+│       └── assets/           # Images and media assets
 ├── internal/                 # Go backend (handlers, workers, config)
-├── python/                   # Python inference scripts
+│   ├── server/               # HTTP routes and handlers
+│   ├── worker/               # Job manager and execution
+│   ├── runtimecheck/         # Runtime probe and installation
+│   └── utils/                # Utility functions
+├── backend/                  # Python inference scripts
+│   ├── rve-backend.py        # Main backend CLI
+│   ├── rtx_upscaler.py       # Smart upscaling pipeline
+│   └── src/                  # Legacy backend modules
+├── runtime/                  # Installed Python environment
+│   └── venv/                 # uv-managed virtual environment
 └── go.mod                    # Go module definition
 ```
 
@@ -417,7 +496,7 @@ go run ./cmd/dasiwa-true-video-enhancer
 ### Adding Features
 
 1. Extend the UI in `index.html` with proper `data-tooltip` attributes
-2. Add handler logic in `internal/handlers/`
+2. Add handler logic in `internal/server/`
 3. Update `app.js` for frontend interactions
 4. Document new fields in this README under the relevant section
 
