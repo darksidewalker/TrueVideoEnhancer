@@ -167,14 +167,17 @@ async function loadSourceProbe(path) {
   const inputPath = (path || $("input")?.value || "").trim();
   if (!inputPath) {
     sourceProbe = null;
+    updateSizeEstimate();
     return null;
   }
   try {
     const probe = await api(`/api/probe?path=${encodeURIComponent(inputPath)}`);
     sourceProbe = probe.error ? null : probe;
+    updateSizeEstimate();
     return sourceProbe;
   } catch (_) {
     sourceProbe = null;
+    updateSizeEstimate();
     return null;
   }
 }
@@ -725,6 +728,66 @@ function formatDuration(seconds) {
   return `${s}s`;
 }
 
+function estimateFileSize() {
+  if (!sourceProbe || !sourceProbe.duration) return null;
+
+  const durationMinutes = sourceProbe.duration / 60;
+  const fpsRatio = parseRate(sourceProbe.r_frame_rate) > 0 
+    ? (Number($("targetFps").value || 0) / parseRate(sourceProbe.r_frame_rate))
+    : 1;
+  
+  const scale = Number($("overrideUpscaleScale").value || $("scale").value || 1);
+  const resolutionFactor = (scale * scale); // Fläche skaliert quadratisch
+  
+  const crf = Number($("crf")?.value || 23);
+  const crfFactor = Math.pow(2, (23 - crf) / 6); // CRF 23 = baseline, ±6 = Faktor 2
+  
+  let codecFactor = 1.0;
+  const encoder = $("videoEncoderPreset")?.value || "auto";
+  switch(encoder) {
+    case "x265_nvenc":
+    case "libx265":
+      codecFactor = 0.7; // ~30% kleiner als H.264
+      break;
+    case "av1":
+    case "av1_nvenc":
+      codecFactor = 0.6; // ~40% kleiner als H.264
+      break;
+    case "prores":
+      codecFactor = 10.0; // Sehr große Dateien
+      break;
+    default: // H.264 or auto
+      codecFactor = 1.0;
+  }
+
+  // Base rate: ~10 MB/min at 1080p, CRF 23, H.264
+  const baseMBPerMin = 10;
+  const estimatedMB = baseMBPerMin * durationMinutes * fpsRatio * resolutionFactor * crfFactor * codecFactor;
+  
+  if (estimatedMB < 1024) {
+    return { size: `${Math.round(estimatedMB)} MB`, details: `~${Math.round(estimatedMB)} MB` };
+  } else {
+    const sizeGB = estimatedMB / 1024;
+    return { size: `${sizeGB.toFixed(1)} GB`, details: `~${Math.round(estimatedMB)} MB` };
+  }
+}
+
+function updateSizeEstimate() {
+  const est = estimateFileSize();
+  const container = $("sizeEstimateContainer");
+  const sizeEl = $("estimatedSize");
+  
+  if (!container) return;
+  
+  if (!est) {
+    container.style.display = "none";
+    return;
+  }
+  
+  container.style.display = "flex";
+  sizeEl.textContent = est.size;
+}
+
 
 function startEncodePreview(jobID) {
   const panel = document.querySelector(".preview-panel");
@@ -793,12 +856,26 @@ $("installRuntime").addEventListener("click", installRuntime);
 $("quitApp").addEventListener("click", quitApp);
 $("jobForm").addEventListener("submit", startJob);
 $("openOutputFolder").addEventListener("click", openOutputFolder);
-$("input").addEventListener("change", function() { loadSourceProbe(this.value); });
-$("targetFps").addEventListener("input", updateModelAutoLabels);
+$("input").addEventListener("change", function() { 
+  loadSourceProbe(this.value);
+  updateSizeEstimate();
+});
+$("targetFps").addEventListener("input", function() {
+  updateModelAutoLabels();
+  updateSizeEstimate();
+});
 $("openTune").addEventListener("click", () => $("tuneDialog").showModal());
 $("contentType").addEventListener("change", selectBestUpscalerModel);
-$("scale").addEventListener("change", selectBestUpscalerModel);
-$("overrideUpscaleScale").addEventListener("input", selectBestUpscalerModel);
+$("scale").addEventListener("change", function() {
+  selectBestUpscalerModel();
+  updateSizeEstimate();
+});
+$("overrideUpscaleScale").addEventListener("input", function() {
+  selectBestUpscalerModel();
+  updateSizeEstimate();
+});
+$("videoEncoderPreset").addEventListener("change", updateSizeEstimate);
+$("crf").addEventListener("input", updateSizeEstimate);
 $("upscaleModel").addEventListener("change", function() { setSelectedModel("upscaler", this.value || ""); updateModelAutoLabels(); });
 $("rifeModel").addEventListener("change", function() { setSelectedModel("interpolation", this.value || ""); updateModelAutoLabels(); });
 

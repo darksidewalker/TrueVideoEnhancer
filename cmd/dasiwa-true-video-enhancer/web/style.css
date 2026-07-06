@@ -84,9 +84,14 @@ button {
 pre { margin: 0; white-space: pre-wrap; color: #cbd7e8; min-height: 160px; }
 #log { max-height: 360px; overflow-y: auto; overflow-x: hidden; border: 1px solid var(--line); border-radius: 14px; padding: 14px; background: rgba(5, 8, 13, .55); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 .eta-card { display: grid; gap: 2px; padding: 12px 14px; margin-bottom: 12px; border: 1px solid var(--line); border-radius: 14px; background: var(--panel-2); }
+.meta-row { display: flex; gap: 12px; align-items: stretch; }
 .eta-card span { color: var(--amber); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
 .eta-card strong { color: var(--text); font-size: 22px; }
 .eta-card small { color: var(--muted); }
+.size-estimate { display: grid; gap: 2px; padding: 12px 14px; margin-bottom: 12px; border: 1px solid var(--line); border-radius: 14px; background: rgba(99,243,255,.06); }
+.size-estimate .size-label { color: var(--cyan); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+.size-estimate strong { color: var(--text); font-size: 22px; }
+.size-estimate small { color: var(--muted); }
 .encode-preview { display: none; width: 100%; max-height: 270px; object-fit: contain; margin: 12px 0; border-radius: 16px; border: 1px solid var(--line); background: #000; }
 .encode-preview.ready { display: block; }
 .placeholder-frame { display: flex; align-items: center; justify-content: center; padding: 40px 0 20px; color: var(--muted); }

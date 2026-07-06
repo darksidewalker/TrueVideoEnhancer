@@ -64,11 +64,18 @@
 
       <section class="panel preview-panel">
         <div class="panel-head"><span>02 Preview</span><strong>Live encode preview</strong></div>
-        <div class="eta-card">
-          <span>ETA</span>
-          <strong id="etaValue">Idle</strong>
-          <small id="progressValue">No active job</small>
-        </div>
+        <div class="preview-meta">
+          <div class="meta-row">
+            <div class="eta-card">
+              <span>ETA</span>
+              <strong id="etaValue">Idle</strong>
+              <small id="progressValue">No active job</small>
+            </div>
+            <div class="size-estimate" id="sizeEstimateContainer" style="display:none;">
+              <span class="size-label">Estimated Size</span>
+              <strong id="estimatedSize">--</strong>
+            </div>
+          </div>
         <div class="placeholder-frame" id="placeholderFrame">
           <svg viewBox="0 0 48 36" width="32" height="24"><rect x="2" y="2" width="44" height="32" rx="3" fill="none" stroke="currentColor" opacity=".25"/><polygon points="18,10 18,26 34,18" fill="currentColor" opacity=".3"/></svg>
         </div>
