@@ -49,6 +49,19 @@ except Exception:
     HAS_SAFETENSORS = False
 
 try:
+    import nvvfx  # noqa: F401
+    HAS_NVVFX = True
+except Exception:
+    HAS_NVVFX = False
+
+HAS_CUDA = False
+try:
+    import torch
+    HAS_CUDA = torch.cuda.is_available() if torch is not None else False
+except ImportError:
+    pass
+
+try:
     from rve_backend import ModelLoader
 except Exception as exc:  # pragma: no cover - full error emitted on actual use
     ModelLoader = None
@@ -535,10 +548,37 @@ def render(args) -> None:
         info.get("subtitle_codec", ""),
     )
     output_fps, factor = derive_target_fps(info["fps"], args.target_fps)
-    output_width, output_height = derive_output_resolution(
-        info["width"], info["height"], args.scale, args.override_upscale_scale,
-    )
-    log("RES", f"source={info['width']}x{info['height']} target={output_width}x{output_height}", detail=f"scale={args.override_upscale_scale or args.scale} upscale_model={args.upscale_model or 'none'}")
+    
+    # Apply RTX upscale if enabled
+    if hasattr(args, 'rtx_upscale') and args.rtx_upscale and args.upscale_model:
+        log("UPSCALE", f"RTX upscale enabled with model: {args.upscale_model}")
+        
+        # Temporarily extract frames for upscaling
+        temp_dir = tempfile.mkdtemp(prefix="dasiwa-upscale-")
+        src_frames = extract_source_frames(args.input, Path(temp_dir) / "source")
+        
+        target_scale = args.override_upscale_scale or args.scale
+        preview_cb = lambda frame: update_live_preview(frame, Path(args.preview_dir)) if args.preview_dir else None
+        
+        count, out_w, out_h = apply_upscale_refine(
+            source_frames=src_frames,
+            upscale_model=args.upscale_model,
+            target_scale=target_scale,
+            output_dir=Path(temp_dir) / "frames",
+            device_id=args.pytorch_gpu_id,
+            preview_cb=preview_cb,
+        )
+        
+        output_width, output_height = out_w, out_h
+        log("RES", f"After RTX upscale: {out_w}x{out_h}", detail=f"frames={count}")
+        
+        shutil.rmtree(temp_dir)
+    else:
+        output_width, output_height = derive_output_resolution(
+            info["width"], info["height"], args.scale, args.override_upscale_scale,
+        )
+        log("RES", f"source={info['width']}x{info['height']} target={output_width}x{output_height}", 
+            detail=f"scale={args.override_upscale_scale or args.scale} upscale_model={args.upscale_model or 'none'}")
     if args.interpolate_model and factor <= 1.0:
         log("WARN", "interpolation model selected but no FPS increase requested; skipping RIFE")
     if factor > 1.0 and not args.interpolate_model:
@@ -614,6 +654,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--pytorch_gpu_id", type=int, default=0)
     parser.add_argument("--ncnn_gpu_id", type=int, default=0)
+    parser.add_argument("--rtx_upscale", action="store_true", help="Enable RTX VFX upscaling with Lanczos fallback")
     return parser
 
 

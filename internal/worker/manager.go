@@ -221,7 +221,7 @@ func (m *Manager) buildArgs(req Request, previewDir string) []string {
 	if req.Scale > 0 {
 		args = append(args, "--scale", strconv.Itoa(req.Scale))
 	}
-	if req.Scale >= 2 && req.UpscaleModel != "" {
+	if req.UpscaleModel != "" {
 		args = append(args, "--upscale_model", req.UpscaleModel)
 	}
 	if req.RIFEModel != "" {
