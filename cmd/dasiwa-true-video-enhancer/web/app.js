@@ -596,7 +596,6 @@ async function startJob(event) {
   event.preventDefault();
   try {
     await loadSourceProbe($("input").value);
-    loadSourcePreview($("input").value);
     const request = collectJob();
     const job = await api("/api/jobs", { method: "POST", body: JSON.stringify(request) });
     currentJob = job;
@@ -707,28 +706,6 @@ function formatDuration(seconds) {
   return `${s}s`;
 }
 
-function loadSourcePreview(path) {
-  stopEncodePreview();
-  const video = $("videoPreview");
-  const hint = $("previewHint");
-  path = String(path || "").trim();
-  if (!video || !path) return;
-  if (video.dataset.sourcePath === path) return;
-  video.dataset.sourcePath = path;
-  delete video.dataset.jobId;
-  video.classList.remove("ready");
-  if (hint) hint.textContent = "Loading source stream preview…";
-  video.src = `/api/stream?path=${encodeURIComponent(path)}&t=${Date.now()}`;
-  video.load();
-  video.onloadedmetadata = () => {
-    video.classList.add("ready");
-    if (hint) hint.textContent = "Live preview of the currently selected source stream.";
-  };
-  video.onerror = () => {
-    video.classList.remove("ready");
-    if (hint) hint.textContent = "Source preview could not be opened. The job can still run if the backend can read the file.";
-  };
-}
 
 function startEncodePreview(jobID) {
   const panel = document.querySelector(".preview-panel");
@@ -792,7 +769,7 @@ $("installRuntime").addEventListener("click", installRuntime);
 $("quitApp").addEventListener("click", quitApp);
 $("jobForm").addEventListener("submit", startJob);
 $("openOutputFolder").addEventListener("click", openOutputFolder);
-$("input").addEventListener("change", function() { loadSourceProbe(this.value); loadSourcePreview(this.value); });
+$("input").addEventListener("change", function() { loadSourceProbe(this.value); });
 $("targetFps").addEventListener("input", updateModelAutoLabels);
 $("openTune").addEventListener("click", () => $("tuneDialog").showModal());
 $("contentType").addEventListener("change", selectBestUpscalerModel);
@@ -933,7 +910,6 @@ function renderFileList(items, isSearch) {
         } else {
           $("input").value = it.path;
           loadSourceProbe(it.path);
-          loadSourcePreview(it.path);
           currentBrowsePath = filepathDir(it.path);
           $("fileBrowserDialog").close();
         }

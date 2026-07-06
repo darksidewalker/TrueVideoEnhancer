@@ -63,17 +63,15 @@
       </form>
 
       <section class="panel preview-panel">
-        <div class="panel-head"><span>02 Preview</span><strong>Live source stream</strong></div>
+        <div class="panel-head"><span>02 Preview</span><strong>Live encode preview</strong></div>
         <div class="eta-card">
           <span>ETA</span>
           <strong id="etaValue">Idle</strong>
           <small id="progressValue">No active job</small>
         </div>
-        <video id="videoPreview" class="video-preview" controls muted playsinline preload="metadata"></video>
         <img id="encodePreview" class="encode-preview" alt="Live encode preview" />
-        <p id="previewHint">Select an input video to preview the current source stream. The player stays on the live source while jobs run.</p>
+        <p id="previewHint">Während der Verarbeitung wird hier ein Live-Bild des aktuellen Encodes angezeigt.</p>
       </section>
-
       <section class="panel jobs-panel">
         <div class="panel-head"><span>03 Queue</span><strong>Jobs &amp; Logs</strong><button id="openOutputFolder" type="button" data-tooltip="btn-open-output-folder">Open Output Folder</button></div>
         <pre id="log" data-tooltip="field-log">No job started yet.</pre>
