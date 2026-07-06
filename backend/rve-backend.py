@@ -1,591 +1,449 @@
 #!/usr/bin/env python3
-"""DaSiWa TrueVideoEnhancer Python backend.
+"""DaSiWa TrueVideoEnhancer backend entrypoint.
 
-Full inference pipeline: extracts frames via FFmpeg, upscales with PyTorch/TensorRT,
-interpolates frames with RIFE, then remuxes via FFmpeg.
+This is the CLI that the Go worker starts.  It keeps target-FPS handling in
+one place: probe the source FPS, derive the interpolation cadence, generate a
+monotonic output frame sequence, then mux it at the requested target FPS.
 """
 
-import os
-import sys
+from __future__ import annotations
+
 import argparse
 import json
-import subprocess
+import math
+import os
 import shutil
+import subprocess
+import sys
 import tempfile
+from fractions import Fraction
 from pathlib import Path
+from typing import Iterable
 
-# Add backend directory to path for 'from src.*' imports
-_this_dir = os.path.dirname(os.path.abspath(__file__))
-if _this_dir not in sys.path:
-    sys.path.insert(0, _this_dir)
+_THIS_DIR = Path(__file__).resolve().parent
+if str(_THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(_THIS_DIR))
 
-from src.version import __version__
+try:
+    import cv2
+    import numpy as np
+except Exception:  # pragma: no cover - reported by --list-backends
+    cv2 = None
+    np = None
 
 try:
     import torch
-    import torch.nn as nn
-    HAS_TORCH = True
-except ImportError:
-    HAS_TORCH = False
+except Exception:  # pragma: no cover - reported by --list-backends
+    torch = None
 
 try:
-    import tensorrt as trt
-    import torch_tensorrt
+    import tensorrt as trt  # noqa: F401
     HAS_TRT = True
-except ImportError:
+except Exception:
     HAS_TRT = False
 
 try:
-    from safetensors.torch import load_file as load_safetensors
+    import safetensors  # noqa: F401
     HAS_SAFETENSORS = True
-except ImportError:
+except Exception:
     HAS_SAFETENSORS = False
 
+try:
+    from rve_backend import ModelLoader
+except Exception as exc:  # pragma: no cover - full error emitted on actual use
+    ModelLoader = None
+    MODEL_LOADER_ERROR = exc
+else:
+    MODEL_LOADER_ERROR = None
 
-def probe_source_fps(input_path):
-    """Probe source video FPS via ffprobe."""
+VERSION = "0.2.0"
+SUPPORTED_VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"}
+
+_COLOR = sys.stderr.isatty() or os.environ.get("FORCE_COLOR") in {"1", "true", "yes"}
+_COLORS = {
+    "RESET": "\033[0m", "BOLD": "\033[1m", "DIM": "\033[2m",
+    "PIPE": "\033[96m", "MODEL": "\033[95m", "TECH": "\033[94m",
+    "FPS": "\033[92m", "RES": "\033[92m", "FRAMES": "\033[96m",
+    "ENCODE": "\033[94m", "DONE": "\033[92m", "WARN": "\033[93m", "ERROR": "\033[91m",
+}
+
+
+def log(tag: str, message: str, *, detail: str | None = None) -> None:
+    color = _COLORS.get(tag, "") if _COLOR else ""
+    reset = _COLORS["RESET"] if _COLOR else ""
+    dim = _COLORS["DIM"] if _COLOR else ""
+    line = f"{color}[{tag}]{reset} {message}"
+    if detail:
+        line += f" {dim}{detail}{reset}"
+    print(line, file=sys.stderr)
+
+
+def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+
+def _ffmpeg() -> str:
+    path = shutil.which("ffmpeg")
+    if not path:
+        raise RuntimeError("ffmpeg not found on PATH")
+    return path
+
+
+def _ffprobe() -> str:
+    path = shutil.which("ffprobe")
+    if not path:
+        raise RuntimeError("ffprobe not found on PATH")
+    return path
+
+
+def _ratio_to_float(value: str) -> float:
     try:
-        cmd = ["ffprobe", "-v", "quiet", "-print_format", "json",
-               "-show_streams", input_path]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            return 0.0
-        data = json.loads(result.stdout)
-        for stream in data.get("streams", []):
-            if stream.get("codec_type") == "video":
-                fr = stream.get("r_frame_rate", "0/1")
-                num, den = fr.split("/")
-                fps = float(num) / float(den) if float(den) != 0 else 0.0
-                if fps > 0:
-                    return fps
-        fmt = data.get("format", {})
-        af = fmt.get("avg_frame_rate", "0/1")
-        num, den = af.split("/")
-        return float(num) / float(den) if float(den) != 0 else 0.0
+        return float(Fraction(value))
     except Exception:
         return 0.0
 
 
-class ModelLoader:
-    """Load safetensors models into PyTorch tensors."""
-
-    def __init__(self, device="auto"):
-        self.device = self._resolve_device(device)
-        if HAS_TORCH:
-            self.dtype = torch.float16 if ("cuda" in str(self.device) or "mps" in str(self.device)) else torch.float32
-        else:
-            self.dtype = None
-
-    def _resolve_device(self, device_str):
-        if HAS_TORCH:
-            if device_str == "auto":
-                if torch.cuda.is_available():
-                    return torch.device("cuda:0")
-                elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-                    return torch.device("mps")
-                return torch.device("cpu")
-            return torch.device(device_str)
-        return "cpu"
-
-    def load_upscaler(self, model_path):
-        """Load an upscaling model (e.g., AnimeSharpV4, HAT-L) from safetensors.
-
-        Returns a callable: ImageTensor -> UpscaledImageTensor.
-        Falls back to nearest-neighbor resize if model loading fails.
-        """
-        if not HAS_TORCH:
-            print("WARNING: PyTorch not available, upscaling disabled", file=sys.stderr)
-            return None
-
-        try:
-            sd = load_safetensors(model_path)
-            print(f"Loaded upscaler model {model_path}: {len(sd)} tensors, {sum(t.numel() for t in sd.values())} params")
-
-            # Try to infer model architecture from state dict keys
-            # Most upscalers use a similar architecture (RCAN-like or HAT-like)
-            # We'll create a minimal wrapper that applies the loaded weights
-            return UpscalerWrapper(sd, self.device, self.dtype)
-        except Exception as e:
-            print(f"WARNING: Failed to load upscaler '{model_path}': {e}", file=sys.stderr)
-            return None
-
-    def load_interpolator(self, model_path):
-        """Load a RIFE-style interpolation model from safetensors.
-
-        Returns a callable: (FrameA, FrameB, timestep) -> InterpolatedFrame.
-        """
-        if not HAS_TORCH:
-            print("WARNING: PyTorch not available, interpolation disabled", file=sys.stderr)
-            return None
-
-        try:
-            sd = load_safetensors(model_path)
-            print(f"Loaded interpolation model {model_path}: {len(sd)} tensors, {sum(t.numel() for t in sd.values())} params")
-            return InterpolatorWrapper(sd, self.device, self.dtype)
-        except Exception as e:
-            print(f"WARNING: Failed to load interpolation model '{model_path}': {e}", file=sys.stderr)
-            return None
+def probe_video(input_path: str) -> dict:
+    cmd = [
+        _ffprobe(), "-v", "error", "-print_format", "json",
+        "-show_streams", "-show_format", input_path,
+    ]
+    proc = _run(cmd)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffprobe failed: {proc.stderr.strip()}")
+    data = json.loads(proc.stdout or "{}")
+    video = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), None)
+    if not video:
+        raise RuntimeError("input contains no video stream")
+    fps = _ratio_to_float(video.get("avg_frame_rate", "0/1")) or _ratio_to_float(video.get("r_frame_rate", "0/1"))
+    if fps <= 0:
+        raise RuntimeError("could not determine source FPS")
+    width = int(video.get("width", 0) or 0)
+    height = int(video.get("height", 0) or 0)
+    duration = float(video.get("duration") or data.get("format", {}).get("duration") or 0.0)
+    return {"fps": fps, "width": width, "height": height, "duration": duration}
 
 
-class UpscalerWrapper:
-    """Wraps a safetensors state dict as an upscaler.
+def derive_target_fps(source_fps: float, target_fps: float | None) -> tuple[float, float]:
+    if not target_fps or target_fps <= 0:
+        return source_fps, 1.0
+    if target_fps <= source_fps + 1e-6:
+        log("FPS", f"target_fps={target_fps:g} <= source_fps={source_fps:.6g}; keeping source FPS")
+        return source_fps, 1.0
+    factor = target_fps / source_fps
+    log("FPS", f"source={source_fps:.6g}, target={target_fps:.6g}, interpolation_factor={factor:.6g}")
+    return target_fps, factor
 
-    Since we can't know the exact architecture from the safetensors alone,
-    we provide a fallback that performs bilinear/bicubic upscaling using
-    the loaded weights as guidance for quality settings.
 
-    TODO: Integrate with actual model architectures (Real-ESRGAN, AnimeSharpV4, HAT-L)
-    when the architecture wrappers become available.
+def resolve_model_path(path_or_id: str) -> str:
+    if not path_or_id:
+        return ""
+    p = Path(path_or_id).expanduser()
+    if p.exists():
+        return str(p)
+    repo_model = Path("models") / path_or_id
+    if repo_model.exists():
+        return str(repo_model)
+    repo_model_st = Path("models") / f"{path_or_id}.safetensors"
+    if repo_model_st.exists():
+        return str(repo_model_st)
+    raise FileNotFoundError(f"RIFE model not found: {path_or_id}")
+
+
+def extract_source_frames(input_path: str, frame_dir: Path) -> list[Path]:
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    pattern = str(frame_dir / "%08d.png")
+    cmd = [_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-i", input_path, "-vsync", "0", pattern]
+    proc = _run(cmd)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg frame extraction failed: {proc.stderr.strip()}")
+    frames = sorted(frame_dir.glob("*.png"))
+    if len(frames) < 1:
+        raise RuntimeError("no frames extracted")
+    log("FRAMES", f"extracted={len(frames)}", detail=f"dir={frame_dir}")
+    return frames
+
+
+def _to_tensor(frame_bgr):
+    if torch is None:
+        raise RuntimeError("PyTorch is required for RIFE interpolation")
+    rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    return torch.from_numpy(rgb.transpose(2, 0, 1)).float() / 255.0
+
+
+def _to_bgr(tensor):
+    arr = tensor.detach().clamp(0, 1).cpu().numpy().transpose(1, 2, 0)
+    arr = (arr * 255.0 + 0.5).astype(np.uint8)
+    return cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)
+
+
+def select_interpolation_model(args) -> str:
+    model_path = resolve_model_path(args.interpolate_model)
+    content_type = (args.content_type or "mixed").strip().lower()
+    name = Path(model_path).name.lower()
+    if content_type != "anime" and "heavy" in name:
+        general = Path(model_path).with_name("rife_v4.26.safetensors")
+        if general.exists():
+            log("WARN", "Heavy RIFE is anime-specialized; switching to general RIFE for non-anime content", detail=f"content_type={content_type} selected={Path(model_path).name} using={general.name}")
+            return str(general)
+        log("WARN", "Heavy RIFE is anime-specialized but general RIFE model is missing", detail=f"content_type={content_type} selected={Path(model_path).name}")
+    elif content_type == "anime" and "heavy" in name:
+        log("TECH", "Anime content selected: keeping RIFE Heavy Anime model")
+    elif content_type == "anime":
+        log("WARN", "Anime content selected but non-heavy RIFE model is configured", detail=f"selected={Path(model_path).name}")
+    return model_path
+
+
+def build_interpolator(args, width: int, height: int):
+    model_path = select_interpolation_model(args)
+    log("MODEL", f"interpolation={Path(model_path).name}", detail=f"path={model_path}")
+    log("TECH", f"requested_backend={args.backend} precision={args.precision}", detail=f"profile={args.tensorrt_opt_profile} dynamic_shapes={args.tensorrt_dynamic_shapes} input={width}x{height}")
+    if ModelLoader is None:
+        raise RuntimeError(f"RIFE model loader unavailable: {MODEL_LOADER_ERROR}")
+    loader = ModelLoader(device=args.device)
+    return loader.load_interpolator(
+        model_path,
+        backend=args.backend,
+        precision=args.precision,
+        opt_profile=args.tensorrt_opt_profile,
+        dynamic_shapes=args.tensorrt_dynamic_shapes,
+        resolution=(height, width),
+    )
+
+
+def write_target_frames(source_frames: list[Path], output_dir: Path, source_fps: float,
+                        target_fps: float, interpolator) -> int:
+    """Generate a CFR frame sequence at target_fps from source frame times.
+
+    For each output timestamp, choose the adjacent source pair and the exact
+    fractional timestep between them.  This supports arbitrary target FPS such
+    as 24->60 (2.5x), not only integer 2x/4x interpolation.
     """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if cv2 is None or np is None:
+        raise RuntimeError("opencv-python and numpy are required for video processing")
 
-    def __init__(self, state_dict, device, dtype):
-        self.state_dict = state_dict
-        self.device = device
-        self.dtype = dtype
-        self.scale_factor = self._infer_scale(state_dict)
+    total_duration = (len(source_frames) - 1) / source_fps if len(source_frames) > 1 else 1.0 / source_fps
+    out_count = max(1, int(math.floor(total_duration * target_fps + 1e-6)) + 1)
+    technique = getattr(interpolator, "technique", type(interpolator).__name__)
+    log("PIPE", f"output_frames={out_count} target_fps={target_fps:.6g}", detail=f"interpolation={technique}")
 
-    def _infer_scale(self, sd):
-        """Try to infer upscale factor from weight dimensions."""
-        for k, v in sd.items():
-            if len(v.shape) >= 4:
-                in_c = v.shape[1]
-                out_c = v.shape[0]
-                if out_c == in_c * 4:
-                    return 2.0
-                elif out_c == in_c * 16:
-                    return 4.0
-        return 2.0  # Default to 2x
+    cache_index = -1
+    frame_a = frame_b = None
+    for out_idx in range(out_count):
+        t = out_idx / target_fps
+        pos = min(t * source_fps, len(source_frames) - 1)
+        left = int(math.floor(pos))
+        right = min(left + 1, len(source_frames) - 1)
+        timestep = float(pos - left)
 
-    def __call__(self, image_tensor):
-        """Upscale an image tensor [C,H,W] or batched [N,C,H,W]."""
-        if not HAS_TORCH:
-            return image_tensor
+        if left != cache_index:
+            frame_a = cv2.imread(str(source_frames[left]), cv2.IMREAD_COLOR)
+            frame_b = cv2.imread(str(source_frames[right]), cv2.IMREAD_COLOR)
+            cache_index = left
+        elif right == left:
+            frame_b = frame_a
 
-        orig_shape = image_tensor.shape
-        is_batched = len(orig_shape) == 4
+        if frame_a is None or frame_b is None:
+            raise RuntimeError(f"failed to read source frame pair {left}/{right}")
 
-        if is_batched:
-            b, c, h, w = orig_shape
-            new_h, new_w = int(h * self.scale_factor), int(w * self.scale_factor)
-            return torch.nn.functional.interpolate(image_tensor, size=(new_h, new_w),
-                                                    mode='bilinear', align_corners=False)
+        if right == left or timestep <= 1e-5:
+            out = frame_a
+        elif timestep >= 1.0 - 1e-5:
+            out = frame_b
         else:
-            c, h, w = orig_shape
-            new_h, new_w = int(h * self.scale_factor), int(w * self.scale_factor)
-            img = image_tensor.unsqueeze(0)
-            upscaled = torch.nn.functional.interpolate(img, size=(new_h, new_w),
-                                                        mode='bilinear', align_corners=False)
-            return upscaled.squeeze(0)
+            a = _to_tensor(frame_a)
+            b = _to_tensor(frame_b)
+            out = _to_bgr(interpolator.interpolate(a, b, timestep=timestep))
+
+        out_path = output_dir / f"{out_idx + 1:08d}.png"
+        if not cv2.imwrite(str(out_path), out):
+            raise RuntimeError(f"failed to write output frame: {out_path}")
+        if (out_idx + 1) % 50 == 0 or out_idx + 1 == out_count:
+            log("PIPE", f"wrote {out_idx + 1}/{out_count} frames")
+    return out_count
 
 
-class InterpolatorWrapper:
-    """Wraps a safetensors state dict as a RIFE-style interpolator.
-
-    RIFE models predict intermediate flows between two frames.
-    Since we can't reconstruct the full RIFE network from safetensors alone,
-    we provide a fallback that performs temporal blending.
-
-    TODO: Integrate with actual RIFE network architecture when available.
-    """
-
-    def __init__(self, state_dict, device, dtype):
-        self.state_dict = state_dict
-        self.device = device
-        self.dtype = dtype
-
-    def __call__(self, frame_a, frame_b, timestep=0.5):
-        """Interpolate between two frames at given timestep (0.0-1.0)."""
-        if not HAS_TORCH:
-            return frame_a
-
-        # Ensure same device and dtype
-        frame_a = frame_a.to(self.device).to(self.dtype)
-        frame_b = frame_b.to(self.device).to(self.dtype)
-
-        # Fallback: linear blend (in production, this would be RIFE flow warping)
-        blended = (1.0 - timestep) * frame_a + timestep * frame_b
-        return blended
+def derive_output_resolution(width: int, height: int, scale: int, override_scale: int = 0) -> tuple[int, int]:
+    factor = override_scale if override_scale > 0 else scale
+    if factor <= 0:
+        factor = 1
+    out_w = max(2, int(round(width * factor)))
+    out_h = max(2, int(round(height * factor)))
+    # Most delivery codecs / yuv420 formats require even dimensions.  Keeping
+    # this universal avoids NVENC/libx264 failures on odd-sized source videos.
+    out_w += out_w % 2
+    out_h += out_h % 2
+    return out_w, out_h
 
 
-class VideoPipeline:
-    """Complete video processing pipeline."""
-
-    def __init__(self, args, loader):
-        self.args = args
-        self.loader = loader
-        self.temp_dir = None
-
-    def run(self):
-        """Execute the full pipeline: extract -> process -> mux."""
-        self.temp_dir = tempfile.mkdtemp(prefix="rve_")
-        print(f"Working directory: {self.temp_dir}")
-
-        try:
-            # Step 1: Extract frames
-            frame_paths = self.extract_frames()
-            if not frame_paths:
-                raise RuntimeError("No frames extracted from input video")
-            print(f"Extracted {len(frame_paths)} frames")
-
-            # Step 2: Process frames (upscale + interpolate)
-            processed_paths = self.process_frames(frame_paths)
-            print(f"Processed {len(processed_paths)} frames")
-
-            # Step 3: Remux
-            self.remux(processed_paths)
-            print(f"Rendering complete: {self.args.output}")
-
-        finally:
-            # Cleanup temp dir
-            if self.temp_dir and os.path.exists(self.temp_dir):
-                shutil.rmtree(self.temp_dir, ignore_errors=True)
-
-    def extract_frames(self):
-        """Extract video frames as PNG sequence via FFmpeg."""
-        output_pattern = os.path.join(self.temp_dir, "frame_%06d.png")
-
-        # Probe source FPS for ffmpeg
-        src_fps = probe_source_fps(self.args.input)
-        if src_fps <= 0:
-            src_fps = 24.0  # Default fallback
-
-        cmd = [
-            "ffmpeg", "-y",
-            "-i", self.args.input,
-            "-vf", f"fps={src_fps},scale=-2:-2",
-            "-pix_fmt", "rgb24",
-            output_pattern
-        ]
-
-        print(f"Extracting frames with: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"FFmpeg stderr: {result.stderr}", file=sys.stderr)
-            raise RuntimeError(f"FFmpeg frame extraction failed: {result.stderr}")
-
-        # Collect extracted frames
-        frames = sorted(Path(self.temp_dir).glob("frame_*.png"))
-        return [str(f) for f in frames]
-
-    def process_frames(self, frame_paths):
-        """Apply upscaling and/or interpolation to frames."""
-        processed = []
-
-        # Determine if we need upscaling
-        needs_upscale = self.args.upscale_model and os.path.isfile(self.args.upscale_model)
-        needs_interp = self.args.interpolate_model and self.args.interpolate_factor > 1.0
-
-        # Load models
-        upscaler = None
-        interpolator = None
-        if needs_upscale:
-            print(f"Loading upscaler: {self.args.upscale_model}")
-            upscaler = self.loader.load_upscaler(self.args.upscale_model)
-        if needs_interp:
-            print(f"Loading interpolator: {self.args.interpolate_model}")
-            interpolator = self.loader.load_interpolator(self.args.interpolate_model)
-
-        # Recalculate after loading — if model failed, skip that step
-        actually_upscale = upscaler is not None
-        actually_interp = interpolator is not None and self.args.interpolate_factor > 1.0
-
-        if not actually_upscale and not actually_interp:
-            # No processing needed, frames are already in temp_dir — use them directly
-            return [str(fp) for fp in frame_paths]
-
-        # Process each frame
-        prev_frame = None
-        interp_step = 1.0 / (self.args.interpolate_factor - 1.0) if needs_interp else 0.0
-
-        for i, fp in enumerate(frame_paths):
-            # Load frame
-            frame = cv2_load_frame(fp)
-            if frame is None:
-                continue
-
-            # Upscale first
-            if upscaler is not None:
-                frame = upscaler(frame)
-
-            # Interpolate between previous and current frame
-            if interpolator is not None and prev_frame is not None:
-                # Generate intermediate frames
-                n_steps = max(1, int(round(self.args.interpolate_factor - 1.0)))
-                for s in range(n_steps + 1):
-                    t = s / n_steps
-                    blended = interpolator(prev_frame, frame, t)
-                    out_path = os.path.join(self.temp_dir, f"proc_{i:06d}_{s:03d}.png")
-                    cv2_save_frame(blended, out_path)
-                    processed.append(out_path)
-            else:
-                # Just save the (possibly upscaled) frame
-                out_path = os.path.join(self.temp_dir, f"proc_{i:06d}_000.png")
-                cv2_save_frame(frame, out_path)
-                processed.append(out_path)
-
-            prev_frame = frame
-
-        return processed
-
-    def remux(self, processed_paths):
-        """Reassemble processed frames into final video via FFmpeg."""
-        output_pattern = os.path.join(self.temp_dir, "proc_%06d_%.3d.png")
-        target_fps = self.args.target_fps if self.args.target_fps > 0 else 24.0
-
-        # Build FFmpeg command
-        cmd = [
-            "ffmpeg", "-y",
-            "-framerate", str(target_fps),
-            "-i", output_pattern,
-            "-c:v", "libx264",
-            "-preset", self.args.video_encoder_preset or "medium",
-            "-crf", self.args.crf or "18",
-            "-pix_fmt", self.args.video_pixel_format or "yuv420p",
-            "-movflags", "+faststart",
-            self.args.output
-        ]
-
-        # Handle audio
-        has_audio = self._has_audio(self.args.input)
-        if has_audio:
-            if self.args.audio_encoder_preset == "copy_audio":
-                cmd.extend(["-c:a", "copy"])
-            elif self.args.audio_bitrate:
-                cmd.extend(["-c:a", "aac", "-b:a", self.args.audio_bitrate])
-
-        print(f"Remuxing with: {' '.join(cmd)}")
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode != 0:
-            print(f"FFmpeg stderr: {result.stderr}", file=sys.stderr)
-            raise RuntimeError(f"FFmpeg remuxing failed: {result.stderr}")
-
-    def _has_audio(self, input_path):
-        """Check if input video has an audio stream."""
-        try:
-            cmd = ["ffprobe", "-v", "quiet", "-print_format", "json",
-                   "-show_streams", input_path]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode == 0:
-                data = json.loads(result.stdout)
-                for stream in data.get("streams", []):
-                    if stream.get("codec_type") == "audio":
-                        return True
-        except Exception:
-            pass
-        return False
+def encoder_args(encoder: str, crf: str, pix_fmt: str) -> list[str]:
+    enc = (encoder or "libx264").strip()
+    quality = crf or "18"
+    pix = pix_fmt or "yuv420p"
+    if enc in {"x264_nvenc", "h264_nvenc"}:
+        return ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", quality, "-pix_fmt", pix]
+    if enc in {"x265_nvenc", "hevc_nvenc"}:
+        return ["-c:v", "hevc_nvenc", "-preset", "p5", "-cq", quality, "-pix_fmt", pix]
+    if enc == "av1_nvenc":
+        return ["-c:v", "av1_nvenc", "-preset", "p5", "-cq", quality, "-pix_fmt", pix]
+    if enc == "libx265":
+        return ["-c:v", "libx265", "-preset", "medium", "-crf", quality, "-pix_fmt", pix]
+    if enc == "vp9":
+        return ["-c:v", "libvpx-vp9", "-crf", quality, "-b:v", "0", "-pix_fmt", pix]
+    if enc == "av1":
+        return ["-c:v", "libsvtav1", "-crf", quality, "-preset", "6", "-pix_fmt", pix]
+    if enc == "prores":
+        return ["-c:v", "prores_ks", "-profile:v", "3", "-pix_fmt", "yuv422p10le"]
+    if enc == "ffv1":
+        return ["-c:v", "ffv1", "-level", "3", "-pix_fmt", pix]
+    return ["-c:v", "libx264", "-preset", "medium", "-crf", quality, "-pix_fmt", pix]
 
 
-def cv2_load_frame(path):
-    """Load a PNG frame as a PyTorch tensor [C,H,W] normalized to [0,1]."""
-    if not HAS_TORCH:
-        return None
-    try:
-        import cv2
-        img = cv2.imread(path, cv2.IMREAD_COLOR)
-        if img is None:
-            return None
-        # BGR -> RGB, HWC -> CHW, [0,255] -> [0,1]
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        tensor = torch.from_numpy(img).permute(2, 0, 1).float() / 255.0
-        return tensor
-    except Exception as e:
-        print(f"WARNING: Failed to load frame {path}: {e}", file=sys.stderr)
-        return None
+def audio_args(audio_encoder: str, audio_bitrate: str | None) -> list[str]:
+    enc = (audio_encoder or "copy_audio").strip()
+    if enc in {"", "copy", "copy_audio"}:
+        return ["-c:a", "copy"]
+    args = ["-c:a", enc]
+    if audio_bitrate:
+        args += ["-b:a", audio_bitrate]
+    return args
 
 
-def cv2_save_frame(tensor, path):
-    """Save a PyTorch tensor [C,H,W] in [0,1] as a PNG frame."""
-    if not HAS_TORCH:
-        return
-    try:
-        import cv2
-        img = tensor.clamp(0, 1).permute(1, 2, 0).numpy()
-        img = (img * 255).astype('uint8')
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-        cv2.imwrite(path, img)
-    except Exception as e:
-        print(f"WARNING: Failed to save frame {path}: {e}", file=sys.stderr)
+def subtitle_args(subtitle_encoder: str) -> list[str]:
+    enc = (subtitle_encoder or "copy_subtitle").strip()
+    if enc in {"", "copy", "copy_subtitle"}:
+        return ["-c:s", "copy"]
+    return ["-c:s", enc]
 
 
-class HandleApplication:
-    """Main application handler."""
+def encode_video(input_video: str, output_video: str, frame_dir: Path, fps: float,
+                 crf: str, encoder: str, pix_fmt: str, audio_encoder: str,
+                 subtitle_encoder: str, audio_bitrate: str | None,
+                 output_width: int, output_height: int):
+    Path(output_video).parent.mkdir(parents=True, exist_ok=True)
+    fps_str = f"{fps:.6f}".rstrip("0").rstrip(".")
+    cmd = [
+        _ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
+        "-framerate", fps_str,
+        "-i", str(frame_dir / "%08d.png"),
+        "-i", input_video,
+        "-map", "0:v:0", "-map", "1:a?", "-map", "1:s?",
+        "-vf", f"scale={output_width}:{output_height}:flags=lanczos",
+    ]
+    cmd += encoder_args(encoder, crf, pix_fmt)
+    cmd += audio_args(audio_encoder, audio_bitrate)
+    cmd += subtitle_args(subtitle_encoder)
+    cmd += ["-shortest", output_video]
+    proc = _run(cmd)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg encode failed: {proc.stderr.strip()}")
+    log("ENCODE", f"video_encoder={encoder_args(encoder, crf, pix_fmt)[1]} audio={audio_encoder or 'copy'} subtitles={subtitle_encoder or 'copy'}", detail=f"quality={crf} pix_fmt={pix_fmt} fps={fps_str}")
+    log("DONE", f"output={output_video}", detail=f"resolution={output_width}x{output_height} requested_encoder={encoder}")
 
-    def __init__(self):
-        self.args = self.handleArguments()
-        if self.args.version:
-            print(f"{__version__}")
-            sys.exit(0)
 
-        if self.args.print_video_info:
-            print(f"Input: {self.args.input}")
-            fps = probe_source_fps(self.args.input)
-            print(f"Source FPS: {fps}")
-            print(f"Target FPS: {self.args.target_fps}" if self.args.target_fps > 0 else "")
-            sys.exit(0)
+def render(args) -> None:
+    log("PIPE", "DaSiWa TrueVideoEnhancer backend start", detail=f"version={VERSION}")
+    log("PIPE", f"input={args.input}", detail=f"output={args.output}")
+    info = probe_video(args.input)
+    log("TECH", "video_probe", detail=f"source={info['width']}x{info['height']} fps={info['fps']:.6g} duration={info['duration']:.3f}s")
+    output_fps, factor = derive_target_fps(info["fps"], args.target_fps)
+    output_width, output_height = derive_output_resolution(
+        info["width"], info["height"], args.scale, args.override_upscale_scale,
+    )
+    log("RES", f"source={info['width']}x{info['height']} target={output_width}x{output_height}", detail=f"scale={args.override_upscale_scale or args.scale} upscale_model={args.upscale_model or 'none'}")
+    if args.interpolate_model and factor <= 1.0:
+        log("WARN", "interpolation model selected but no FPS increase requested; copying source cadence")
+    if not args.interpolate_model:
+        raise RuntimeError("--interpolate_model is required for frame interpolation")
 
-        if not self.args.list_backends:
-            # Probe source FPS before validation so --target_fps can derive factor
-            if self.args.target_fps and self.args.target_fps > 0:
-                source_fps = probe_source_fps(self.args.input)
-                if source_fps <= 0:
-                    raise ValueError(
-                        f"Could not determine source FPS from '{self.args.input}'. "
-                        "Cannot compute interpolation factor from --target_fps."
-                    )
-                self.applyTargetFPS(source_fps)
-            self.checkArguments()
-            if not self.batchProcessing():
-                self.renderVideo()
-        else:
-            self.listBackends()
-
-    def batchProcessing(self):
-        """Handle batch processing from .txt files."""
-        if os.path.splitext(self.args.input)[-1] == ".txt":
-            with open(self.args.input, "r") as f:
-                for line in f.readlines():
-                    sys.argv[1:] = line.split()
-                    self.args = self.handleArguments()
-                    self.renderVideo()
-            return True
-        return False
-
-    def listBackends(self):
-        """List available inference backends."""
-        print("DaSiWa TrueVideoEnhancer Backends:")
-        print("=" * 40)
-
-        if HAS_TORCH:
-            cuda_avail = torch.cuda.is_available()
-            device_count = torch.cuda.device_count() if cuda_avail else 0
-            print(f"[{'✓' if cuda_avail else '✗'}] PyTorch v{torch.__version__}")
-            if cuda_avail:
-                print(f"  CUDA devices: {device_count}")
-                for i in range(device_count):
-                    props = torch.cuda.get_device_properties(i)
-                    print(f"  GPU {i}: {props.name} ({props.total_memory / 1024**3:.1f} GB)")
-            else:
-                print("  CUDA not available")
-
-        if HAS_TRT:
-            print(f"[✓] TensorRT v{trt.__version__}")
-        else:
-            print("[✗] TensorRT not available")
-
-        print(f"[{'✓' if HAS_SAFETENSORS else '✗'}] safetensors")
-
-    def applyTargetFPS(self, source_fps):
-        """Calculate interpolation factor from target FPS."""
-        if not self.args.target_fps:
-            return
-        if self.args.target_fps <= 0:
-            raise ValueError("Target FPS must be greater than 0")
-        if source_fps <= 0:
-            raise ValueError("Source FPS must be greater than 0 to use --target_fps")
-        self.args.interpolate_factor = self.args.target_fps / source_fps
-
-    def checkArguments(self):
-        """Validate command-line arguments."""
-        if self.args.output and os.path.isfile(self.args.output) and not self.args.overwrite:
-            raise OSError("Output file already exists!")
-        if "http" not in self.args.input and not os.path.isfile(self.args.input):
-            raise OSError("Input file does not exist!")
-        if self.args.tilesize < 0:
-            raise ValueError("Tilesize must be greater than 0")
-        if self.args.interpolate_factor < 0:
-            raise ValueError("Interpolation factor must be greater than 0")
-        if self.args.interpolate_factor == 1 and self.args.interpolate_model:
-            raise ValueError(
-                "Interpolation factor must be greater than 1 if interpolation model is used."
-            )
-        if self.args.interpolate_factor != 1 and not self.args.interpolate_model:
-            raise ValueError(
-                "Interpolation factor must be 1 if no interpolation model is used."
-            )
-        if self.args.backend == 'ncnn' and self.args.hdr_mode:
-            print("WARNING: HDR mode is not supported with ncnn backend, falling back to SDR", file=sys.stderr)
-            self.args.hdr_mode = False
-
-    def renderVideo(self):
-        """Execute the rendering pipeline."""
-        print(f"\n{'='*60}")
-        print(f"Rendering: {self.args.input} -> {self.args.output}")
-        print(f"Backend: {self.args.backend}, Device: {self.args.device}")
-        print(f"Precision: {self.args.precision}")
-        if self.args.upscale_model:
-            print(f"Upscale: {os.path.basename(self.args.upscale_model)}")
-        if self.args.interpolate_model:
-            print(f"Interpolate: {os.path.basename(self.args.interpolate_model)} @ factor {self.args.interpolate_factor:.2f}x")
-        print(f"{'='*60}\n")
-
-        loader = ModelLoader(self.args.device)
-        pipeline = VideoPipeline(self.args, loader)
-        pipeline.run()
-
-    def handleArguments(self):
-        """Parse command-line arguments."""
-        parser = argparse.ArgumentParser(
-            description="Backend to RVE, used to upscale and interpolate videos"
+    with tempfile.TemporaryDirectory(prefix="dasiwa-rife-") as td:
+        temp = Path(td)
+        src = extract_source_frames(args.input, temp / "source")
+        interpolator = build_interpolator(args, info["width"], info["height"])
+        count = write_target_frames(src, temp / "frames", info["fps"], output_fps, interpolator)
+        encode_video(
+            args.input, args.output, temp / "frames", output_fps,
+            args.crf, args.video_encoder_preset, args.video_pixel_format,
+            args.audio_encoder_preset, args.subtitle_encoder_preset, args.audio_bitrate,
+            output_width, output_height,
         )
+    print(json.dumps({"status": "success", "output": args.output, "target_fps": output_fps, "frames": count, "width": output_width, "height": output_height}))
 
-        # Input/output
-        parser.add_argument("-i", "--input", default=None, help="input video path", type=str)
-        parser.add_argument("-o", "--output", default=None, help="output video path or PIPE", type=str)
-        parser.add_argument("--start_time", default=None, help="Start of video to be rendered in seconds", type=float)
-        parser.add_argument("--end_time", default=None, help="End of video to be rendered in seconds", type=float)
-        parser.add_argument("--print_video_info", default=None, help="Print video information and exit", type=str)
 
-        # Backend selection
-        parser.add_argument("-b", "--backend", help="backend used to upscale image", default="pytorch", choices=["pytorch", "ncnn", "tensorrt"])
-        parser.add_argument("--device", help="Device for inference", default="auto", choices=["auto", "cuda", "mps", "xpu", "cpu"])
-        parser.add_argument("--pytorch_gpu_id", help="GPU ID for pytorch backend", default=0, type=int)
-        parser.add_argument("--ncnn_gpu_id", help="GPU ID for ncnn backend", default=0, type=int)
+def print_backends() -> None:
+    checks = [
+        ("PyTorch", torch is not None),
+        ("TensorRT", HAS_TRT),
+        ("safetensors", HAS_SAFETENSORS),
+        ("OpenCV", cv2 is not None),
+        ("FFmpeg", shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None),
+    ]
+    for name, ok in checks:
+        print(f"[{'✓' if ok else '✗'}] {name}")
 
-        # Models
-        parser.add_argument("--upscale_model", help="Direct path to upscaling model", type=str)
-        parser.add_argument("--interpolate_model", help="Direct path to interpolation model", type=str)
-        parser.add_argument("--extra_restoration_models", help="Compression fixer models", action='append')
-        parser.add_argument("--scene_detect_model", help="Scene change detection model", type=str, default=None)
 
-        # Parameters
-        parser.add_argument("--interpolate_factor", help="Multiplier for interpolation", type=float, default=1.0)
-        parser.add_argument("--target_fps", help="Target output FPS (e.g., 30, 60)", type=float, default=0.0)
-        parser.add_argument("--precision", help="Model precision", default="auto", choices=["auto", "float16", "float32"])
-        parser.add_argument("--tilesize", help="Upscale in smaller chunks", default=0, type=int)
-        parser.add_argument("--tensorrt_opt_profile", help="TensorRT optimization profile", type=int, default=3)
-        parser.add_argument("--tensorrt_dynamic_shapes", help="Use dynamic shapes for TensorRT", action="store_true")
-        parser.add_argument("--scene_detect_method", help="Scene detection method", default="pyscenedetect")
-        parser.add_argument("--scene_detect_threshold", help="Scene detection sensitivity", type=float, default=4.0)
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="DaSiWa TrueVideoEnhancer RIFE backend")
+    parser.add_argument("--version", action="store_true")
+    parser.add_argument("--list-backends", action="store_true")
+    parser.add_argument("--input")
+    parser.add_argument("--output")
+    parser.add_argument("--backend", choices=["pytorch", "tensorrt", "onnxruntime"], default="tensorrt")
+    parser.add_argument("--precision", choices=["float16", "float32"], default="float16")
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--scale", type=int, default=1)
+    parser.add_argument("--upscale_model", default="")
+    parser.add_argument("--interpolate_model", default="")
+    parser.add_argument("--target_fps", type=float, default=0.0)
+    parser.add_argument("--content_type", default="mixed", choices=["anime", "mixed", "realism"])
+    parser.add_argument("--crf", default="18")
+    parser.add_argument("--video_encoder_preset", default="fast")
+    parser.add_argument("--video_pixel_format", default="yuv420p")
+    parser.add_argument("--audio_encoder_preset", default="copy")
+    parser.add_argument("--subtitle_encoder_preset", default="copy")
+    parser.add_argument("--audio_bitrate", default="")
+    parser.add_argument("--tilesize", type=int, default=0)
+    parser.add_argument("--tensorrt_dynamic_shapes", action="store_true")
+    parser.add_argument("--tensorrt_opt_profile", type=int, default=3)
+    parser.add_argument("--scene_detect_method", default="none")
+    parser.add_argument("--scene_detect_threshold", type=float, default=0.0)
+    parser.add_argument("--custom_encoder", default="")
+    parser.add_argument("--override_upscale_scale", type=int, default=0)
+    parser.add_argument("--hdr_mode", action="store_true")
+    parser.add_argument("--UHD_mode", action="store_true")
+    parser.add_argument("--slomo_mode", action="store_true")
+    parser.add_argument("--ensemble", action="store_true")
+    parser.add_argument("--dynamic_scaled_optical_flow", action="store_true")
+    parser.add_argument("--benchmark", action="store_true")
+    parser.add_argument("--start_time", type=float, default=0.0)
+    parser.add_argument("--end_time", type=float, default=0.0)
+    parser.add_argument("--device", default="auto")
+    parser.add_argument("--pytorch_gpu_id", type=int, default=0)
+    parser.add_argument("--ncnn_gpu_id", type=int, default=0)
+    return parser
 
-        # Output settings
-        parser.add_argument("--overwrite", help="Overwrite existing output", action="store_true")
-        parser.add_argument("--border_detect", help="Remove black bars", action="store_true")
-        parser.add_argument("--crf", help="Constant rate factor", default="18")
-        parser.add_argument("--video_encoder_preset", help="Video encoder preset", default="libx264")
-        parser.add_argument("--audio_encoder_preset", help="Audio encoder preset", default="copy_audio")
-        parser.add_argument("--subtitle_encoder_preset", help="Subtitle encoder preset", default="copy_subtitle")
-        parser.add_argument("--audio_bitrate", help="Audio bitrate", default="192k")
-        parser.add_argument("--custom_encoder", help="Custom encoder", default=None)
-        parser.add_argument("--video_pixel_format", help="Output pixel format", default="yuv420p")
 
-        # Advanced options
-        parser.add_argument("--benchmark", help="Benchmark without saving", action="store_true")
-        parser.add_argument("--UHD_mode", help="Lower resolution for optical flow", action="store_true")
-        parser.add_argument("--slomo_mode", help="Increase length instead of framerate", action="store_true")
-        parser.add_argument("--hdr_mode", help="HDR color space encoding", action="store_true")
-        parser.add_argument("--dynamic_scaled_optical_flow", help="Scale optical flow dynamically", action="store_true")
-        parser.add_argument("--ensemble", help="Use ensemble interpolation", action="store_true")
-        parser.add_argument("--output_to_mpv", help="Output to mpv player", action="store_true")
-        parser.add_argument("--list_backends", help="List available backends", action="store_true")
-        parser.add_argument("--version", help="Print version and exit", action="store_true")
-        parser.add_argument("--cwd", help="Working directory", default=None)
-        parser.add_argument("--pause_shared_memory_id", help="Pause state file", default=None)
-        parser.add_argument("--merge_subtitles", help="Merge subtitles", action="store_true", default=True)
-        parser.add_argument("--override_upscale_scale", help="Override upscale scale", type=int, default=None)
-        parser.add_argument("--preview_shared_memory_id", help="Preview shared memory", default=None)
-
-        return parser.parse_args()
+def main(argv: Iterable[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.version:
+        print(VERSION)
+        return 0
+    if args.list_backends:
+        print_backends()
+        return 0
+    if not args.input or not args.output:
+        parser.error("--input and --output are required")
+    if Path(args.output).exists() and not args.overwrite:
+        raise RuntimeError(f"output exists (use --overwrite): {args.output}")
+    render(args)
+    return 0
 
 
 if __name__ == "__main__":
-    HandleApplication()
+    try:
+        raise SystemExit(main())
+    except Exception as exc:
+        print(f"[ERROR] {exc}", file=sys.stderr)
+        raise SystemExit(1)

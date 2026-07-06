@@ -17,6 +17,7 @@ import (
 type Config struct {
 	BackendScript string
 	Python        string
+	VenvDir       string // Path to virtual environment directory (e.g., "runtime/venv")
 }
 
 type Manager struct {
@@ -167,7 +168,17 @@ func (m *Manager) Cancel(id string) error {
 
 func (m *Manager) run(ctx context.Context, id string, args []string) {
 	m.setStatus(id, "running")
-	cmd := exec.CommandContext(ctx, m.cfg.Python, args...)
+	
+	// Use venv python if available
+	pythonPath := m.cfg.Python
+	if m.cfg.VenvDir != "" {
+		venvPython := filepath.Join(m.cfg.VenvDir, "bin", "python")
+		if _, err := os.Stat(venvPython); err == nil {
+			pythonPath = venvPython
+		}
+	}
+	
+	cmd := exec.CommandContext(ctx, pythonPath, args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		m.finish(id, "error", err.Error())
@@ -199,11 +210,17 @@ func (m *Manager) buildArgs(req Request) []string {
 		backend = "tensorrt"
 	}
 	args := []string{m.cfg.BackendScript, "--input", req.Input, "--output", req.Output, "--backend", backend, "--overwrite"}
+	if req.Scale > 0 {
+		args = append(args, "--scale", strconv.Itoa(req.Scale))
+	}
 	if req.Scale >= 2 && req.UpscaleModel != "" {
 		args = append(args, "--upscale_model", req.UpscaleModel)
 	}
 	if req.RIFEModel != "" {
 		args = append(args, "--interpolate_model", req.RIFEModel)
+	}
+	if req.ContentType != "" {
+		args = append(args, "--content_type", req.ContentType)
 	}
 	if req.TargetFPS > 0 {
 		args = append(args, "--target_fps", strconv.FormatFloat(req.TargetFPS, 'f', -1, 64))

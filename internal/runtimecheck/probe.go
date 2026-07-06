@@ -140,7 +140,13 @@ func (p *Probe) Status() Status {
 }
 
 func (p *Probe) PythonCommand() string {
-	// Try to get uv-managed Python first (portable, no system dependencies)
+	// Prefer venv Python — it has PyTorch, TensorRT, and all inference packages
+	venvPython := p.venvPython()
+	if _, err := os.Stat(venvPython); err == nil {
+		return venvPython
+	}
+	
+	// Fallback: try to get uv-managed Python (bare, no packages — will fail at import)
 	uv := p.UvCommand()
 	out, err := p.run(context.Background(), uv, "python", "find", "3.12")
 	if err == nil {
@@ -148,12 +154,6 @@ func (p *Probe) PythonCommand() string {
 		if path != "" {
 			return path
 		}
-	}
-	
-	// Fallback: check if venv Python exists
-	venvPython := p.venvPython()
-	if _, err := os.Stat(venvPython); err == nil {
-		return venvPython
 	}
 	
 	// Last resort: system Python (requires installation)
