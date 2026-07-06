@@ -115,7 +115,7 @@ dialog::backdrop { background: rgba(0,0,0,.7); }
 .file-browser-row { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 10px; background: var(--panel-2); font-size: 14px; cursor: pointer; transition: background .12s; }
 .file-browser-row:hover { background: color-mix(in srgb, var(--panel-2) 80%, var(--cyan) 10%); }
 .file-browser-icon { width: 20px; min-width: 20px; display: flex; align-items: center; justify-content: center; color: var(--muted); opacity: .7; }
-.file-browser-name { flex: 1; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-browser-name { flex: 1; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .file-browser-path-bar { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-bottom: 12px; padding: 8px 12px; background: var(--panel-2); border-radius: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
 .file-browser-path-segment { color: var(--cyan); cursor: pointer; padding: 2px 4px; border-radius: 4px; transition: background .12s; }
 .file-browser-path-segment:hover { background: rgba(99,243,255,.12); }
