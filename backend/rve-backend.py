@@ -229,7 +229,7 @@ def build_interpolator(args, width: int, height: int):
 
 
 def write_target_frames(source_frames: list[Path], output_dir: Path, source_fps: float,
-                        target_fps: float, interpolator, preview_dir: Path | None = None) -> int:
+                        target_fps: float, interpolator) -> int:
     """Generate a CFR frame sequence at target_fps from source frame times.
 
     For each output timestamp, choose the adjacent source pair and the exact
@@ -276,37 +276,47 @@ def write_target_frames(source_frames: list[Path], output_dir: Path, source_fps:
         out_path = output_dir / f"{out_idx + 1:08d}.png"
         if not cv2.imwrite(str(out_path), out):
             raise RuntimeError(f"failed to write output frame: {out_path}")
-        update_live_preview(out, preview_dir)
+        emit_live_preview(out)
         if (out_idx + 1) % 50 == 0 or out_idx + 1 == out_count:
             log("PIPE", f"wrote {out_idx + 1}/{out_count} frames")
     return out_count
 
 
-def write_source_cadence_frames(source_frames: list[Path], output_dir: Path, preview_dir: Path | None = None) -> int:
+def write_source_cadence_frames(source_frames: list[Path], output_dir: Path) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     total = len(source_frames)
     log("PIPE", f"output_frames={total} target_fps=source", detail="interpolation=skipped")
     for idx, frame in enumerate(source_frames, start=1):
         shutil.copy2(frame, output_dir / f"{idx:08d}.png")
-        if preview_dir and cv2 is not None:
-            update_live_preview(cv2.imread(str(frame), cv2.IMREAD_COLOR), preview_dir)
+        if cv2 is not None:
+            emit_live_preview(cv2.imread(str(frame), cv2.IMREAD_COLOR))
         if idx % 50 == 0 or idx == total:
             log("PIPE", f"wrote {idx}/{total} frames")
     return total
 
 
-def update_live_preview(frame, preview_dir: Path | None) -> None:
-    if preview_dir is None or frame is None or cv2 is None:
+_PREVIEW_MARKER = "<PREVIEW>"
+
+
+def emit_live_preview(frame) -> None:
+    """Emit the latest processed frame as a base64-encoded JPEG on stderr.
+
+    Format: ``<PREVIEW><base64-jpeg-bytes>\\n``.  The Go worker filters this
+    marker from log output and stores the decoded bytes in memory for live
+    streaming over HTTP.
+    """
+    if frame is None or cv2 is None:
         return
-    preview_dir.mkdir(parents=True, exist_ok=True)
     height, width = frame.shape[:2]
     if width > 640:
         scale = 640 / float(width)
         frame = cv2.resize(frame, (640, max(2, int(height * scale))), interpolation=cv2.INTER_AREA)
-    tmp = preview_dir / "latest.tmp.jpg"
-    target = preview_dir / "latest.jpg"
-    if cv2.imwrite(str(tmp), frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82]):
-        tmp.replace(target)
+    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+    if not ok:
+        return
+    import base64
+    encoded = base64.b64encode(buf.tobytes()).decode("ascii")
+    print(f"{_PREVIEW_MARKER}{encoded}", file=sys.stderr, flush=True)
 
 
 def derive_output_resolution(width: int, height: int, scale: int, override_scale: int = 0) -> tuple[int, int]:
@@ -558,7 +568,7 @@ def render(args) -> None:
         src_frames = extract_source_frames(args.input, Path(temp_dir) / "source")
         
         target_scale = args.override_upscale_scale or args.scale
-        preview_cb = lambda frame: update_live_preview(frame, Path(args.preview_dir)) if args.preview_dir else None
+        preview_cb = lambda frame: emit_live_preview(frame)
         
         count, out_w, out_h = apply_smart_upscale(
             source_frames=src_frames,
@@ -585,16 +595,15 @@ def render(args) -> None:
     if factor > 1.0 and not args.interpolate_model:
         raise RuntimeError("--interpolate_model is required for frame interpolation")
 
-    preview_dir = Path(args.preview_dir) if args.preview_dir else None
     with tempfile.TemporaryDirectory(prefix="dasiwa-rife-") as td:
         temp = Path(td)
         src = extract_source_frames(args.input, temp / "source")
         frame_dir = temp / "frames"
         if factor > 1.0:
             interpolator = build_interpolator(args, info["width"], info["height"])
-            count = write_target_frames(src, frame_dir, info["fps"], output_fps, interpolator, preview_dir)
+            count = write_target_frames(src, frame_dir, info["fps"], output_fps, interpolator)
         else:
-            count = write_source_cadence_frames(src, frame_dir, preview_dir)
+            count = write_source_cadence_frames(src, frame_dir)
         encode_video(
             args.input, args.output, frame_dir, output_fps,
             args.crf, args.video_encoder_preset, args.video_pixel_format,
@@ -613,7 +622,7 @@ def print_backends() -> None:
         ("FFmpeg", shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None),
     ]
     for name, ok in checks:
-        print(f"[{'✓' if ok else '✗'}] {name}")
+        print(f"[{'OK' if ok else 'XX'}] {name}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -622,7 +631,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--list-backends", action="store_true")
     parser.add_argument("--input")
     parser.add_argument("--output")
-    parser.add_argument("--preview_dir", default="")
     parser.add_argument("--backend", choices=["pytorch", "tensorrt", "onnxruntime"], default="tensorrt")
     parser.add_argument("--precision", choices=["float16", "float32"], default="float16")
     parser.add_argument("--overwrite", action="store_true")

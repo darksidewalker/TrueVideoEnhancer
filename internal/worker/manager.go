@@ -3,6 +3,7 @@ package worker
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -28,6 +29,7 @@ type Manager struct {
 }
 
 const maxStoredLogLines = 800
+const _PREVIEW_MARKER = "<PREVIEW>"
 
 type Event struct {
 	Type string `json:"type"`
@@ -36,17 +38,17 @@ type Event struct {
 }
 
 type Job struct {
-	ID        string    `json:"id"`
-	Input     string    `json:"input"`
-	Output    string    `json:"output"`
-	Preview   string    `json:"preview,omitempty"`
-	Status    string    `json:"status"`
-	StartedAt time.Time `json:"started_at"`
-	EndedAt   time.Time `json:"ended_at,omitempty"`
-	Args      []string  `json:"args"`
-	Logs      []string  `json:"logs"`
-	Error     string    `json:"error,omitempty"`
-	cancel    context.CancelFunc
+	ID          string    `json:"id"`
+	Input       string    `json:"input"`
+	Output      string    `json:"output"`
+	Status      string    `json:"status"`
+	StartedAt   time.Time `json:"started_at"`
+	EndedAt     time.Time `json:"ended_at,omitempty"`
+	Args        []string  `json:"args"`
+	Logs        []string  `json:"logs"`
+	Error       string    `json:"error,omitempty"`
+	LivePreview []byte    `json:"-"` // Base64-decoded JPEG frame (in-memory only)
+	cancel      context.CancelFunc
 }
 
 type Request struct {
@@ -98,9 +100,8 @@ func (m *Manager) Start(req Request) (*Job, error) {
 		return nil, err
 	}
 	jobID := newID()
-	previewDir := filepath.Join(os.TempDir(), "dasiwa-live-preview", jobID)
-	args := m.buildArgs(req, previewDir)
-	job := &Job{ID: jobID, Input: req.Input, Output: req.Output, Preview: previewDir, Status: "queued", StartedAt: time.Now(), Args: args}
+	args := m.buildArgs(req)
+	job := &Job{ID: jobID, Input: req.Input, Output: req.Output, Status: "queued", StartedAt: time.Now(), Args: args}
 
 	m.mu.Lock()
 	m.jobs[job.ID] = job
@@ -189,19 +190,56 @@ func (m *Manager) run(ctx context.Context, id string, args []string) {
 		m.finish(id, "error", err.Error())
 		return
 	}
-	cmd.Stderr = cmd.Stdout
+
+	// Separate stderr pipe for preview data parsing
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		m.finish(id, "error", err.Error())
+		return
+	}
+
 	if err := cmd.Start(); err != nil {
 		m.finish(id, "error", err.Error())
 		return
 	}
 
-	scanner := bufio.NewScanner(stdout)
-	for scanner.Scan() {
-		m.appendLog(id, scanner.Text())
-	}
-	if err := scanner.Err(); err != nil {
-		m.appendLog(id, "log stream error: "+err.Error())
-	}
+	// Scan stdout and stderr concurrently so live preview and log lines
+	// arrive in real time instead of only after the process exits.
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Scan stdout for logs (final JSON summary etc.)
+	go func() {
+		defer wg.Done()
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			m.appendLog(id, scanner.Text())
+		}
+		if err := scanner.Err(); err != nil {
+			m.appendLog(id, "log stream error: "+err.Error())
+		}
+	}()
+
+	// Scan stderr for preview data (<PREVIEW><base64>) and log lines
+	go func() {
+		defer wg.Done()
+		previewScanner := bufio.NewScanner(stderr)
+		previewScanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // handle large base64 frames
+		for previewScanner.Scan() {
+			line := previewScanner.Text()
+			if strings.HasPrefix(line, _PREVIEW_MARKER) {
+				base64Data := line[len(_PREVIEW_MARKER):]
+				if decoded, err := base64.StdEncoding.DecodeString(base64Data); err == nil {
+					m.setLivePreview(id, decoded)
+				}
+			} else if len(line) > 0 {
+				// Non-preview stderr lines are also logged
+				m.appendLog(id, line)
+			}
+		}
+	}()
+
+	wg.Wait()
 	if err := cmd.Wait(); err != nil {
 		m.finish(id, "error", err.Error())
 		return
@@ -209,15 +247,12 @@ func (m *Manager) run(ctx context.Context, id string, args []string) {
 	m.finish(id, "done", "")
 }
 
-func (m *Manager) buildArgs(req Request, previewDir string) []string {
+func (m *Manager) buildArgs(req Request) []string {
 	backend := req.Backend
 	if backend == "" {
 		backend = "tensorrt"
 	}
 	args := []string{m.cfg.BackendScript, "--input", req.Input, "--output", req.Output, "--backend", backend, "--overwrite"}
-	if previewDir != "" {
-		args = append(args, "--preview_dir", previewDir)
-	}
 	if req.Scale > 0 {
 		args = append(args, "--scale", strconv.Itoa(req.Scale))
 	}
@@ -235,7 +270,17 @@ func (m *Manager) buildArgs(req Request, previewDir string) []string {
 	}
 	args = append(args, presetArgs(req.Preset)...)
 	args = append(args, advancedArgs(req)...)
-	args = append(args, req.ExtraArgs...)
+	// Filter out preview_dir and other flags that aren't supported by the Python backend
+	filtered := make([]string, 0, len(req.ExtraArgs))
+	for i := 0; i < len(req.ExtraArgs); i += 2 {
+		if req.ExtraArgs[i] != "--preview_dir" {
+			filtered = append(filtered, req.ExtraArgs[i])
+			if i+1 < len(req.ExtraArgs) {
+				filtered = append(filtered, req.ExtraArgs[i+1])
+			}
+		}
+	}
+	args = append(args, filtered...)
 	return args
 }
 
@@ -423,6 +468,14 @@ func (m *Manager) broadcast(id string, event Event) {
 		default:
 		}
 	}
+}
+
+func (m *Manager) setLivePreview(id string, data []byte) {
+	m.mu.Lock()
+	if job := m.jobs[id]; job != nil {
+		job.LivePreview = data
+	}
+	m.mu.Unlock()
 }
 
 func cloneJob(job *Job) *Job {

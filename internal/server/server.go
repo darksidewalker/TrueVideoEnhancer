@@ -447,18 +447,13 @@ func (s *Server) jobLivePreview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "job not found")
 		return
 	}
-	if job.Preview == "" {
-		writeError(w, http.StatusNotFound, "job has no live preview")
-		return
-	}
-	preview := filepath.Join(job.Preview, "latest.jpg")
-	if _, err := os.Stat(preview); err != nil {
+	if len(job.LivePreview) == 0 {
 		writeError(w, http.StatusAccepted, "live preview is not ready yet")
 		return
 	}
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "no-store")
-	http.ServeFile(w, r, preview)
+	w.Write(job.LivePreview)
 }
 
 func (s *Server) jobPreview(w http.ResponseWriter, r *http.Request) {
