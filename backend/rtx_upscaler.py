@@ -1,11 +1,12 @@
-"""NVIDIA RTX VFX Upscaler with Lanczos Fallback.
+"""NVIDIA RTX VFX Upscaler with Intelligent Scaling.
 
-Provides high-quality upscaling/refinement for DaSiWa TVE.
-When used with Scale=1, applies the upscale model then downscales back
-to original resolution for pure quality improvement without size change.
+Applies upscale model only when needed (target factor ≠ model factor).
+Supports optional final RTX pass for maximum quality.
 
-Primary path: NVIDIA RTX VFX Video Super Resolution (if available)
-Fallback: OpenCV Lanczos resampling (high quality, no GPU dependency)
+Pipeline:
+1. Detect model factor from filename (2x, 4x)
+2. If target_scale ≠ model_factor → upscale to model_factor, then downscale to target
+3. Optional: Apply RTX VFX again at end for refinement
 """
 
 from __future__ import annotations
@@ -93,115 +94,171 @@ class RTXUpscaler:
 
 
 def detect_upscale_factor(model_path: str) -> int:
-    """Detect the scale factor from an upscale model filename."""
+    """Detect the scale factor from an upscale model filename.
+    
+    Patterns: "2x-anime", "anime-2x-safetensors", "RealESRGAN_x4plus"
+    Returns: 2 or 4 (default 2 if not detected)
+    """
     name = Path(model_path).stem.lower()
+    
+    # Try regex first
     match = __import__("re").search(r"(\d)x", name)
     if match:
-        return int(match.group(1))
+        factor = int(match.group(1))
+        if factor in (2, 4):
+            return factor
+    
+    # Check for common 4x patterns
     if any(x in name for x in ("x4", "_4x", "-4x")):
         return 4
+    
+    # Default to 2x
     return 2
 
 
-def apply_upscale_refine(
+def needs_upscale(target_scale: int, model_factor: int) -> bool:
+    """Check if upscaling is needed based on target vs model factor."""
+    return target_scale != model_factor
+
+
+def apply_smart_upscale(
     source_frames: list[Path],
     upscale_model: str,
     target_scale: int,
     output_dir: Path,
     device_id: int = 0,
     preview_cb: Optional[Callable[[np.ndarray], None]] = None,
+    enable_final_rtx: bool = False,
 ) -> tuple[int, int, int]:
-    """Process frames through upscale model, optionally downscaling back.
+    """Apply upscale model intelligently with optional final RTX pass.
 
     Pipeline:
       1. Detect model factor (e.g., 2x)
-      2. Upscale all frames to model factor × source resolution
-      3. If target_scale < model_factor, downscale to target resolution
-      4. Return (frame_count, output_width, output_height)
+      2. If target_scale ≠ model_factor → upscale to model_factor, then downscale to target
+      3. If target_scale == model_factor → apply model directly
+      4. Optionally apply RTX VFX again at end for refinement
+
+    Returns: (frame_count, output_width, output_height)
     """
     if not upscale_model:
         return len(source_frames), 0, 0
 
     model_factor = detect_upscale_factor(upscale_model)
-    log_info(f"Upscale model: {model_factor}x, target scale: {target_scale}x")
+    log_info(f"Smart upscale: model={model_factor}x, target={target_scale}x")
 
+    # Read first frame to get source dimensions
     first_frame = cv2.imread(str(source_frames[0]))
     if first_frame is None:
         raise RuntimeError(f"Cannot read first frame: {source_frames[0]}")
 
     src_h, src_w = first_frame.shape[:2]
 
-    # Intermediate resolution after applying upscale model
-    mid_w = src_w * model_factor
-    mid_h = src_h * model_factor
+    # Calculate resolutions
+    model_w = src_w * model_factor
+    model_h = src_h * model_factor
+    target_w = src_w * target_scale
+    target_h = src_h * target_scale
 
-    # Final target resolution
-    final_w = src_w * target_scale
-    final_h = src_h * target_scale
+    log_info(f"Source: {src_w}x{src_h} | Model output: {model_w}x{model_h} | Target: {target_w}x{target_h}")
 
-    log_info(f"Source: {src_w}x{src_h} → Model output: {mid_w}x{mid_h} → Final: {final_w}x{final_h}")
-
+    # Initialize upscaler
     upscaler = RTXUpscaler(device_id=device_id)
 
     try:
-        # Phase 1: Upscale
-        tmp_dir = output_dir / "_upscale_tmp"
+        # Phase 1: Apply upscale model
+        tmp_dir = output_dir / "_smart_upscale_tmp"
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
         total = len(source_frames)
-        for i, fp in enumerate(source_frames):
-            frame = cv2.imread(str(fp))
-            if frame is None:
-                log_warn(f"Skipping unreadable frame {i}")
-                continue
+        
+        if needs_upscale(target_scale, model_factor):
+            # Case A: Upscale to model factor, then downscale to target
+            log_info(f"Upscaling {src_w}x{src_h} → {model_w}x{model_h}, then downscaling to {target_w}x{target_h}")
+            
+            for i, fp in enumerate(source_frames):
+                frame = cv2.imread(str(fp))
+                if frame is None:
+                    log_warn(f"Skipping unreadable frame {i}")
+                    continue
 
-            upscaled = upscaler.upscale_frame(frame, mid_w, mid_h)
+                # Upscale to model factor
+                upscaled = upscaler.upscale_frame(frame, model_w, model_h)
 
-            cv2.imwrite(str(tmp_dir / f"{i + 1:08d}.png"), upscaled)
+                # Downscale to target (if different)
+                if target_scale < model_factor:
+                    downscaled = cv2.resize(upscaled, (target_w, target_h), interpolation=cv2.INTER_LANCZOS4)
+                    out_frame = downscaled
+                else:
+                    out_frame = upscaled
 
-            if preview_cb:
-                try:
-                    preview_cb(upscaled)
-                except Exception:
-                    pass
+                cv2.imwrite(str(tmp_dir / f"{i + 1:08d}.png"), out_frame)
 
-            if (i + 1) % 50 == 0 or i + 1 == total:
-                log_info(f"Upscaled {i + 1}/{total} frames")
+                if preview_cb:
+                    try:
+                        preview_cb(out_frame)
+                    except Exception:
+                        pass
 
-        # Phase 2: Downscale back to target if needed
-        if target_scale < model_factor:
-            tgt_dir = output_dir / "_resize_tmp"
-            tgt_dir.mkdir(parents=True, exist_ok=True)
+                if (i + 1) % 50 == 0 or i + 1 == total:
+                    log_info(f"Processed {i + 1}/{total} frames")
 
-            resized_count = 0
+            final_w, final_h = target_w, target_h
+        else:
+            # Case B: Apply model directly (target == model factor)
+            log_info(f"Applying model directly: {src_w}x{src_h} → {model_w}x{model_h}")
+
+            for i, fp in enumerate(source_frames):
+                frame = cv2.imread(str(fp))
+                if frame is None:
+                    log_warn(f"Skipping unreadable frame {i}")
+                    continue
+
+                upscaled = upscaler.upscale_frame(frame, model_w, model_h)
+                cv2.imwrite(str(tmp_dir / f"{i + 1:08d}.png"), upscaled)
+
+                if preview_cb:
+                    try:
+                        preview_cb(upscaled)
+                    except Exception:
+                        pass
+
+                if (i + 1) % 50 == 0 or i + 1 == total:
+                    log_info(f"Upscaled {i + 1}/{total} frames")
+
+            final_w, final_h = model_w, model_h
+
+        # Phase 2: Optional final RTX pass
+        if enable_final_rtx and upscaler.has_rtx:
+            log_info("Applying final RTX VFX pass...")
+            rtx_dir = output_dir / "_final_rtx"
+            rtx_dir.mkdir(parents=True, exist_ok=True)
+
             sorted_frames = sorted(tmp_dir.glob("*.png"))
             for i, fp in enumerate(sorted_frames):
                 frame = cv2.imread(str(fp))
                 if frame is None:
                     continue
-                resized = cv2.resize(frame, (final_w, final_h), interpolation=cv2.INTER_LANCZOS4)
-                cv2.imwrite(str(tgt_dir / f"{i + 1:08d}.png"), resized)
-                resized_count += 1
+
+                # Apply RTX VFX to final resolution
+                rtx_result = upscaler.upscale_frame(frame, final_w, final_h)
+                cv2.imwrite(str(rtx_dir / f"{i + 1:08d}.png"), rtx_result)
 
                 if preview_cb:
                     try:
-                        preview_cb(resized)
+                        preview_cb(rtx_result)
                     except Exception:
                         pass
 
-                if (i + 1) % 50 == 0 or i + 1 == len(sorted_frames):
-                    log_info(f"Downscaled to target: {i + 1}/{resized_count} frames")
-
-            # Clean up intermediate
+            # Replace temp with final
             import shutil
             shutil.rmtree(tmp_dir)
+            tmp_dir.rename(output_dir / "_final_output")
+            tmp_dir = output_dir / "_final_output"
 
-            return resized_count, final_w, final_h
-        else:
-            # No downscale needed — use upscaled frames directly
-            import shutil
-            shutil.rmtree(tmp_dir)
-            return total, mid_w, mid_h
+        final_count = len(list(tmp_dir.glob("*.png")))
+        log_info(f"Final output: {final_w}x{final_h}, {final_count} frames")
+
+        return final_count, final_w, final_h
 
     finally:
         upscaler.close()

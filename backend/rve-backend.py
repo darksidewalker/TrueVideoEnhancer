@@ -560,13 +560,14 @@ def render(args) -> None:
         target_scale = args.override_upscale_scale or args.scale
         preview_cb = lambda frame: update_live_preview(frame, Path(args.preview_dir)) if args.preview_dir else None
         
-        count, out_w, out_h = apply_upscale_refine(
+        count, out_w, out_h = apply_smart_upscale(
             source_frames=src_frames,
             upscale_model=args.upscale_model,
             target_scale=target_scale,
             output_dir=Path(temp_dir) / "frames",
             device_id=args.pytorch_gpu_id,
             preview_cb=preview_cb,
+            enable_final_rtx=getattr(args, 'enable_final_rtx', False),
         )
         
         output_width, output_height = out_w, out_h
@@ -654,6 +655,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--pytorch_gpu_id", type=int, default=0)
     parser.add_argument("--ncnn_gpu_id", type=int, default=0)
+    parser.add_argument("--enable_final_rtx", action="store_true", help="Apply optional final RTX VFX pass after upscaling")
     parser.add_argument("--rtx_upscale", action="store_true", help="Enable RTX VFX upscaling with Lanczos fallback")
     return parser
 
