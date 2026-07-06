@@ -672,8 +672,8 @@ function renderJobProgress(job) {
   const progressEl = $("progressValue");
   if (!etaEl || !progressEl) return;
   if (["done", "error", "cancelled"].includes(job.status)) {
-    etaEl.textContent = job.status === "done" ? "Done" : job.status;
-    progressEl.textContent = parsed ? `${parsed.done}/${parsed.total} frames` : `Status: ${job.status}`;
+    etaEl.textContent = "";
+    progressEl.textContent = "";
     return;
   }
   if (!parsed || !job.started_at) {
@@ -719,19 +719,24 @@ function formatDuration(seconds) {
 function startEncodePreview(jobID) {
   const panel = document.querySelector(".preview-panel");
   const img = $("encodePreview");
-  const hint = $("previewHint");
+  const ph = $("placeholderFrame");
   if (!img || !jobID) return;
   if (livePreviewTimer) clearInterval(livePreviewTimer);
   panel?.classList.add("encoding");
   img.classList.remove("ready");
-  if (hint) hint.textContent = "Waiting for first encoded frame…";
+  if (ph) ph.style.display = "";
+  const loader = new Image();
+  loader.onload = () => {
+    // Only show the frame once the browser confirms it decoded successfully.
+    img.src = loader.src;
+    img.classList.add("ready");
+    if (ph) ph.style.display = "none";
+  };
   const refresh = async () => {
     try {
       const response = await fetch(`/api/jobs/${encodeURIComponent(jobID)}/live-preview?t=${Date.now()}`, { cache: "no-store" });
       if (!response.ok) return;
-      img.src = response.url;
-      img.classList.add("ready");
-      if (hint) hint.textContent = "Live preview of frames being encoded now.";
+      loader.src = response.url;
     } catch (_) {
       // Keep the previous frame visible; the next tick can recover.
     }
