@@ -50,3 +50,8 @@ take_screenshot.py
 # Jupyter notebooks (scratch work)
 .ipynb_checkpoints/
 *.ipynb
+
+# Trained models (large downloads, do not commit)
+models/*.safetensors
+models/*.onnx
+models/.trt-cache/

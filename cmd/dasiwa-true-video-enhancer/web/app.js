@@ -45,6 +45,25 @@ function bestUpscalerModel() {
   const requestedScale = Number($("overrideUpscaleScale").value || $("scale").value || 1);
   if (requestedScale < 2) return null;
 
+  const preset = document.querySelector('input[name="preset"]:checked')?.value || "balanced";
+  const preferred = {
+    anime: {
+      2: { fast: "anime-sharp-v4-2x", balanced: "anime-sharp-v4-2x", best: "anime-sharp-v4-quality-2x" },
+      4: { fast: "nomosuni-span-anime-4x", balanced: "nomosuni-span-anime-4x", best: "anime-restoration-4x" },
+    },
+    mixed: {
+      2: { fast: "nomosuni-span-2x", balanced: "nomosuni-span-2x", best: "nomosuni-span-2x" },
+      4: { fast: "nomosuni-span-4x", balanced: "nomosuni-span-4x", best: "ultrasharpv2-4x" },
+    },
+    realism: {
+      2: { fast: "realplksr-restoration-2x", balanced: "realplksr-restoration-2x", best: "realplksr-restoration-2x" },
+      4: { fast: "clearreality-4x", balanced: "clearreality-4x", best: "nomos-webphoto-4x" },
+    },
+  };
+  const preferredID = preferred[contentType]?.[requestedScale]?.[preset];
+  const preferredModel = runtimeModels.find(function(m) { return m.id === preferredID; });
+  if (preferredModel) return preferredModel;
+
   const upscalers = runtimeModels.filter(function(m) { return m.category === "upscaler"; });
   const sameContent = upscalers.filter(function(m) { return m.subcategory === contentType; });
   let candidates = sameContent.filter(function(m) { return parseModelScale(m) === requestedScale; });
@@ -879,6 +898,9 @@ $("targetFps").addEventListener("input", function() {
 });
 $("openTune").addEventListener("click", () => $("tuneDialog").showModal());
 $("contentType").addEventListener("change", selectBestUpscalerModel);
+document.querySelectorAll('input[name="preset"]').forEach(function(input) {
+  input.addEventListener("change", selectBestUpscalerModel);
+});
 $("scale").addEventListener("change", function() {
   selectBestUpscalerModel();
   updateSizeEstimate();

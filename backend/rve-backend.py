@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from fractions import Fraction
 from pathlib import Path
 from typing import Iterable
@@ -48,12 +49,6 @@ try:
 except Exception:
     HAS_SAFETENSORS = False
 
-try:
-    import nvvfx  # noqa: F401
-    HAS_NVVFX = True
-except Exception:
-    HAS_NVVFX = False
-
 HAS_CUDA = False
 try:
     import torch
@@ -68,6 +63,8 @@ except Exception as exc:  # pragma: no cover - full error emitted on actual use
     MODEL_LOADER_ERROR = exc
 else:
     MODEL_LOADER_ERROR = None
+
+from upscale_inference import choose_tile_size, create_upscaler, process_frames, static_onnx_input_size
 
 VERSION = "0.2.0"
 SUPPORTED_VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"}
@@ -169,7 +166,10 @@ def resolve_model_path(path_or_id: str) -> str:
     repo_model_st = Path("models") / f"{path_or_id}.safetensors"
     if repo_model_st.exists():
         return str(repo_model_st)
-    raise FileNotFoundError(f"RIFE model not found: {path_or_id}")
+    repo_model_onnx = Path("models") / f"{path_or_id}.onnx"
+    if repo_model_onnx.exists():
+        return str(repo_model_onnx)
+    raise FileNotFoundError(f"model not found: {path_or_id}")
 
 
 def extract_source_frames(input_path: str, frame_dir: Path) -> list[Path]:
@@ -229,7 +229,7 @@ def build_interpolator(args, width: int, height: int):
 
 
 def write_target_frames(source_frames: list[Path], output_dir: Path, source_fps: float,
-                        target_fps: float, interpolator) -> int:
+                        target_fps: float, interpolator, *, preview_enabled: bool = True) -> int:
     """Generate a CFR frame sequence at target_fps from source frame times.
 
     For each output timestamp, choose the adjacent source pair and the exact
@@ -276,21 +276,23 @@ def write_target_frames(source_frames: list[Path], output_dir: Path, source_fps:
         out_path = output_dir / f"{out_idx + 1:08d}.png"
         if not cv2.imwrite(str(out_path), out):
             raise RuntimeError(f"failed to write output frame: {out_path}")
-        emit_live_preview(out)
+        if preview_enabled:
+            emit_live_preview(out)
         if (out_idx + 1) % 50 == 0 or out_idx + 1 == out_count:
             log("PIPE", f"wrote {out_idx + 1}/{out_count} frames")
     return out_count
 
 
-def write_source_cadence_frames(source_frames: list[Path], output_dir: Path) -> int:
+def write_source_cadence_frames(source_frames: list[Path], output_dir: Path, *,
+                                preview_enabled: bool = True, progress_enabled: bool = True) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     total = len(source_frames)
     log("PIPE", f"output_frames={total} target_fps=source", detail="interpolation=skipped")
     for idx, frame in enumerate(source_frames, start=1):
         shutil.copy2(frame, output_dir / f"{idx:08d}.png")
-        if cv2 is not None:
+        if preview_enabled and cv2 is not None:
             emit_live_preview(cv2.imread(str(frame), cv2.IMREAD_COLOR))
-        if idx % 50 == 0 or idx == total:
+        if progress_enabled and (idx % 50 == 0 or idx == total):
             log("PIPE", f"wrote {idx}/{total} frames")
     return total
 
@@ -563,37 +565,12 @@ def render(args) -> None:
     print(f"<VIDEO_CODEC>{resolved_codec}", file=sys.stderr, flush=True)
     output_fps, factor = derive_target_fps(info["fps"], args.target_fps)
     
-    # Apply RTX upscale if enabled
-    if hasattr(args, 'rtx_upscale') and args.rtx_upscale and args.upscale_model:
-        log("UPSCALE", f"RTX upscale enabled with model: {args.upscale_model}")
-        
-        # Temporarily extract frames for upscaling
-        temp_dir = tempfile.mkdtemp(prefix="dasiwa-upscale-")
-        src_frames = extract_source_frames(args.input, Path(temp_dir) / "source")
-        
-        target_scale = args.override_upscale_scale or args.scale
-        preview_cb = lambda frame: emit_live_preview(frame)
-        
-        count, out_w, out_h = apply_smart_upscale(
-            source_frames=src_frames,
-            upscale_model=args.upscale_model,
-            target_scale=target_scale,
-            output_dir=Path(temp_dir) / "frames",
-            device_id=args.pytorch_gpu_id,
-            preview_cb=preview_cb,
-            enable_final_rtx=getattr(args, 'enable_final_rtx', False),
-        )
-        
-        output_width, output_height = out_w, out_h
-        log("RES", f"After RTX upscale: {out_w}x{out_h}", detail=f"frames={count}")
-        
-        shutil.rmtree(temp_dir)
-    else:
-        output_width, output_height = derive_output_resolution(
-            info["width"], info["height"], args.scale, args.override_upscale_scale,
-        )
-        log("RES", f"source={info['width']}x{info['height']} target={output_width}x{output_height}", 
-            detail=f"scale={args.override_upscale_scale or args.scale} upscale_model={args.upscale_model or 'none'}")
+    target_scale = args.override_upscale_scale or args.scale
+    output_width, output_height = derive_output_resolution(
+        info["width"], info["height"], args.scale, args.override_upscale_scale,
+    )
+    log("RES", f"source={info['width']}x{info['height']} target={output_width}x{output_height}",
+        detail=f"scale={target_scale} upscale_model={args.upscale_model or 'none'}")
     if args.interpolate_model and factor <= 1.0:
         log("WARN", "interpolation model selected but no FPS increase requested; skipping RIFE")
     if factor > 1.0 and not args.interpolate_model:
@@ -602,12 +579,65 @@ def render(args) -> None:
     with tempfile.TemporaryDirectory(prefix="dasiwa-rife-") as td:
         temp = Path(td)
         src = extract_source_frames(args.input, temp / "source")
-        frame_dir = temp / "frames"
+        generated_dir = temp / "generated"
         if factor > 1.0:
             interpolator = build_interpolator(args, info["width"], info["height"])
-            count = write_target_frames(src, frame_dir, info["fps"], output_fps, interpolator)
+            count = write_target_frames(
+                src, generated_dir, info["fps"], output_fps, interpolator,
+                preview_enabled=not bool(args.upscale_model),
+            )
         else:
-            count = write_source_cadence_frames(src, frame_dir)
+            count = write_source_cadence_frames(
+                src, generated_dir, preview_enabled=not bool(args.upscale_model),
+                progress_enabled=not bool(args.upscale_model),
+            )
+        frame_dir = generated_dir
+        if args.upscale_model:
+            model_path = resolve_model_path(args.upscale_model)
+            log("MODEL", f"upscaler={Path(model_path).name}", detail=f"path={model_path}")
+            fixed_onnx_size = static_onnx_input_size(model_path)
+            if fixed_onnx_size:
+                if fixed_onnx_size[0] != fixed_onnx_size[1] or fixed_onnx_size[0] <= 32:
+                    raise RuntimeError(f"unsupported static ONNX input shape: {fixed_onnx_size}")
+                tile_size = fixed_onnx_size[0] - 32
+                compile_size = fixed_onnx_size
+                log("MODEL", "Static ONNX input detected",
+                    detail=f"input={compile_size[0]}x{compile_size[1]} core_tile={tile_size}")
+            else:
+                tile_size = choose_tile_size(
+                    info["width"], info["height"], requested=args.tilesize, backend=args.backend,
+                )
+                compile_size = ((tile_size + 32, tile_size + 32)
+                                if tile_size > 0 else (info["width"], info["height"]))
+            if tile_size > 0:
+                log("UPSCALE", f"tile_size={tile_size} overlap=16",
+                    detail=f"TensorRT input={compile_size[0]}x{compile_size[1]}")
+            log("ENGINE", "Preparing AI upscaler; TensorRT first run can take several minutes",
+                detail=f"model={Path(model_path).name} input={compile_size[0]}x{compile_size[1]} precision={args.precision}")
+            compile_started = time.monotonic()
+            upscaler = create_upscaler(
+                model_path, backend=args.backend, device=args.device,
+                gpu_id=args.pytorch_gpu_id, precision=args.precision,
+                input_size=compile_size,
+            )
+            log("ENGINE", "TensorRT upscaler ready",
+                detail=f"technique={upscaler.technique} elapsed={time.monotonic() - compile_started:.1f}s")
+            log("UPSCALE", f"output_frames={count} processing_started",
+                detail=f"preview=AI-processed output target={output_width}x{output_height}")
+            try:
+                result = process_frames(
+                    sorted(generated_dir.glob("*.png")), temp / "upscaled", upscaler,
+                    target_scale=target_scale, preview_cb=emit_live_preview,
+                    progress_cb=lambda done, total: log("UPSCALE", f"wrote {done}/{total} frames"),
+                    tile_size=tile_size,
+                )
+                model_scale = upscaler.scale
+            finally:
+                upscaler.close()
+            frame_dir = temp / "upscaled"
+            output_width, output_height = result.width, result.height
+            log("UPSCALE", f"actual_technique={result.technique}",
+                detail=f"frames={len(result.frames)} model_scale={model_scale} target_scale={target_scale}")
         encode_video(
             args.input, args.output, frame_dir, output_fps,
             args.crf, args.video_encoder_preset, args.video_pixel_format,
@@ -618,10 +648,13 @@ def render(args) -> None:
 
 
 def print_backends() -> None:
+    import importlib.util
     checks = [
         ("PyTorch", torch is not None),
         ("TensorRT", HAS_TRT),
         ("safetensors", HAS_SAFETENSORS),
+        ("Spandrel", importlib.util.find_spec("spandrel") is not None),
+        ("ONNX Runtime", importlib.util.find_spec("onnxruntime") is not None),
         ("OpenCV", cv2 is not None),
         ("FFmpeg", shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None),
     ]
@@ -667,8 +700,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--pytorch_gpu_id", type=int, default=0)
     parser.add_argument("--ncnn_gpu_id", type=int, default=0)
-    parser.add_argument("--enable_final_rtx", action="store_true", help="Apply optional final RTX VFX pass after upscaling")
-    parser.add_argument("--rtx_upscale", action="store_true", help="Enable RTX VFX upscaling with Lanczos fallback")
     return parser
 
 

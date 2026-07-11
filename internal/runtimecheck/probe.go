@@ -393,16 +393,27 @@ func builtInModelChoices(modelsDir string) []ModelChoice {
 	const hfFrameInterp = "https://huggingface.co/Comfy-Org/frame_interpolation/resolve/main/frame_interpolation/"
 
 	files := []struct{ id, name, file, category, subcategory, urlOverride string }{
-		// Anime upscalers (AnimeSharpV4 Fast RCAN for 2x, HAT-L Sharp for 4x)
-		{"anime-sharp-v4-2x", "AnimeSharpV4-Fast RCAN PU 2x", "2x-AnimeSharpV4_Fast_RCAN_PU.safetensors", "upscaler", "anime", hfBase + "Kim2091/2x-AnimeSharpV4/resolve/main/2x-AnimeSharpV4_Fast_RCAN_PU.safetensors"},
-		{"hat-l-sharp-4x", "HAT-L Sharp Anime 4x", "4xBHI_small_hat-l_sharp.safetensors", "upscaler", "anime", phhofmBase + "4xBHI_small_hat-l/4xBHI_small_hat-l_sharp.safetensors"},
+		// Recommended video upscalers come first in each content/scale bucket: Auto routing picks the first exact match.
+		// Anime: compression-trained native models; the 4x ONNX graph has a fixed 256x256 input.
+		{"anime-sharp-v4-2x", "AnimeSharpV4 Fast RCAN-PU 2x (Video)", "2x-AnimeSharpV4_Fast_RCAN_PU.safetensors", "upscaler", "anime", hfBase + "Kim2091/2x-AnimeSharpV4/resolve/main/2x-AnimeSharpV4_Fast_RCAN_PU.safetensors"},
+		{"anime-sharp-v4-quality-2x", "AnimeSharpV4 RCAN 2x (Quality)", "2x-AnimeSharpV4_RCAN.safetensors", "upscaler", "anime", hfBase + "Kim2091/2x-AnimeSharpV4/resolve/main/2x-AnimeSharpV4_RCAN.safetensors"},
+		{"nomosuni-span-anime-4x", "NomosUni SPAN Multi-JPEG 4x (Fast)", "4xNomosUni_span_multijpg_fp16_opset17.onnx", "upscaler", "anime", phhofmBase + "4xNomosUni_span_multijpg/4xNomosUni_span_multijpg_fp16_opset17.onnx"},
+		{"anime-restoration-4x", "HFA2k LUDVAE RealPLKSR 4x (Video)", "4xHFA2k_ludvae_realplksr_dysample_256_fp16_fullyoptimized.onnx", "upscaler", "anime", phhofmBase + "4xHFA2k_ludvae_realplksr_dysample/4xHFA2k_ludvae_realplksr_dysample_256_fp16_fullyoptimized.onnx"},
 
-		// Mixed content upscalers (UltraSharpV2 — RealPLKSR-lite architecture, general purpose)
-		{"ultrasharpv2-4x", "UltraSharpV2-Lite 4x", "4x-UltraSharpV2_Lite.safetensors", "upscaler", "mixed", hfBase + "Kim2091/UltraSharpV2/resolve/main/4x-UltraSharpV2_Lite.safetensors"},
+		// Mixed: fast SPAN restoration for 2x and broad-content RealPLKSR-Lite restoration for 4x.
+		{"nomosuni-span-2x", "NomosUni SPAN Multi-JPEG 2x (Fast)", "2xNomosUni_span_multijpg_fp16_opset17.onnx", "upscaler", "mixed", phhofmBase + "2xNomosUni_span_multijpg/2xNomosUni_span_multijpg_fp16_opset17.onnx"},
+		{"nomosuni-span-4x", "NomosUni SPAN Multi-JPEG 4x (Fast)", "4xNomosUni_span_multijpg_fp16_opset17.onnx", "upscaler", "mixed", phhofmBase + "4xNomosUni_span_multijpg/4xNomosUni_span_multijpg_fp16_opset17.onnx"},
+		{"ultrasharpv2-4x", "UltraSharpV2-Lite RealPLKSR 4x (Video)", "4x-UltraSharpV2_Lite.safetensors", "upscaler", "mixed", hfBase + "Kim2091/UltraSharpV2/resolve/main/4x-UltraSharpV2_Lite.safetensors"},
 
-		// Realism upscalers (photorealistic / live-action)
-		{"realplksr-gan-2x", "RealPLKSR-DySample GAN 2x", "2xPublic_realplksr_dysample_layernorm_gan.safetensors", "upscaler", "realism", phhofmBase + "2xPublic_realplksr_dysample_layernorm_gan/2xPublic_realplksr_dysample_layernorm_gan.safetensors"},
-		{"hat-l-4x", "HAT-L Realism 4x", "4xBHI_small_hat-l.safetensors", "upscaler", "realism", phhofmBase + "4xBHI_small_hat-l/4xBHI_small_hat-l.safetensors"},
+		// Realism: degradation-trained RealPLKSR 2x and artifact-resistant SPAN 4x.
+		{"realplksr-restoration-2x", "Public RealPLKSR Restoration 2x (Video)", "2xPublic_realplksr_dysample_layernorm_real.safetensors", "upscaler", "realism", phhofmBase + "2xPublic_realplksr_dysample_layernorm_real/2xPublic_realplksr_dysample_layernorm_real.safetensors"},
+		{"clearreality-4x", "ClearRealityV1 SPAN 4x (Video)", "4x-ClearRealityV1.safetensors", "upscaler", "realism", hfBase + "Kim2091/ClearRealityV1/resolve/main/4x-ClearRealityV1.safetensors"},
+		{"nomos-webphoto-4x", "Nomos WebPhoto RealPLKSR 4x (Restoration)", "4xNomosWebPhoto_RealPLKSR.safetensors", "upscaler", "realism", phhofmBase + "4xNomosWebPhoto_RealPLKSR/4xNomosWebPhoto_RealPLKSR.safetensors"},
+
+		// Optional slower/legacy quality choices; never selected before the video defaults above.
+		{"hat-l-sharp-4x", "HAT-L Sharp Anime 4x (Very Slow)", "4xBHI_small_hat-l_sharp.safetensors", "upscaler", "anime", phhofmBase + "4xBHI_small_hat-l/4xBHI_small_hat-l_sharp.safetensors"},
+		{"realplksr-gan-2x", "RealPLKSR GAN 2x (Clean Inputs)", "2xPublic_realplksr_dysample_layernorm_gan.safetensors", "upscaler", "realism", phhofmBase + "2xPublic_realplksr_dysample_layernorm_gan/2xPublic_realplksr_dysample_layernorm_gan.safetensors"},
+		{"hat-l-4x", "HAT-L Realism 4x (Very Slow)", "4xBHI_small_hat-l.safetensors", "upscaler", "realism", phhofmBase + "4xBHI_small_hat-l/4xBHI_small_hat-l.safetensors"},
 
 		// Interpolation models (RIFE v4.26 remains current SOTA for speed-quality balance)
 		{"rife-v4.26", "RIFE v4.26 General", "rife_v4.26.safetensors", "interpolation", "", hfFrameInterp + "rife_v4.26.safetensors"},

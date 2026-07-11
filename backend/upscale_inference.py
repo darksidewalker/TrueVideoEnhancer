@@ -1,0 +1,306 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
+import warnings
+
+import cv2
+import numpy as np
+
+warnings.filterwarnings("ignore", message="torch.meshgrid: in an upcoming release.*")
+warnings.filterwarnings("ignore", message="Both operands of the binary elementwise op.*")
+warnings.filterwarnings("ignore", message=r"`isinstance\(treespec, LeafSpec\)` is deprecated.*")
+
+
+class Upscaler(Protocol):
+    scale: int
+    technique: str
+
+    def upscale(self, frame: np.ndarray) -> np.ndarray: ...
+    def close(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class UpscaleResult:
+    frames: list[Path]
+    width: int
+    height: int
+    technique: str
+
+
+def choose_tile_size(width: int, height: int, *, requested: int, backend: str) -> int:
+    if requested > 0:
+        return requested
+    if backend == "tensorrt" and width * height > 512 * 512:
+        return 128
+    return 0
+
+
+def static_onnx_input_size(model_path: str | Path) -> tuple[int, int] | None:
+    """Return a model's fixed NCHW input size without creating an ORT session."""
+    path = Path(model_path)
+    if path.suffix.lower() != ".onnx":
+        return None
+    try:
+        import importlib
+        onnx = importlib.import_module("onnx")
+        graph = onnx.load(str(path), load_external_data=False).graph
+        dims = graph.input[0].type.tensor_type.shape.dim
+        height, width = dims[-2].dim_value, dims[-1].dim_value
+    except Exception:
+        return None
+    return (int(width), int(height)) if width > 0 and height > 0 else None
+
+
+def _device_name(device: str, gpu_id: int) -> str:
+    if device == "auto":
+        try:
+            import torch
+            return f"cuda:{gpu_id}" if torch.cuda.is_available() else "cpu"
+        except ImportError:
+            return "cpu"
+    if device == "cuda":
+        return f"cuda:{gpu_id}"
+    return device
+
+
+def create_upscaler(model_path: str | Path, *, backend: str, device: str = "auto",
+                    gpu_id: int = 0, precision: str = "float16",
+                    input_size: tuple[int, int] | None = None) -> Upscaler:
+    path = Path(model_path)
+    suffix = path.suffix.lower()
+    if suffix not in {".safetensors", ".onnx"}:
+        raise ValueError("upscale models must use .safetensors or .onnx")
+    if not path.is_file():
+        raise FileNotFoundError(f"upscale model not found: {path}")
+    if suffix == ".onnx":
+        return ONNXUpscaler(path, backend=backend, gpu_id=gpu_id)
+    return SafetensorsUpscaler(
+        path,
+        backend=backend,
+        device=_device_name(device, gpu_id),
+        precision=precision,
+        input_size=input_size,
+    )
+
+
+class SafetensorsUpscaler:
+    def __init__(self, model_path: Path, *, backend: str, device: str,
+                 precision: str, input_size: tuple[int, int] | None):
+        import torch
+        try:
+            from spandrel import ImageModelDescriptor, ModelLoader
+        except ImportError as exc:
+            raise RuntimeError("spandrel is required for safetensors upscalers") from exc
+
+        descriptor = ModelLoader().load_from_file(model_path)
+        if not isinstance(descriptor, ImageModelDescriptor):
+            raise RuntimeError(f"model is not an image upscaler: {model_path.name}")
+        self.scale = int(descriptor.scale)
+        self.device = torch.device(device)
+        self.dtype = torch.float16 if precision == "float16" and self.device.type == "cuda" else torch.float32
+        try:
+            self.model = descriptor.to(self.device, dtype=self.dtype).eval()
+        except Exception as exc:
+            if self.dtype != torch.float16 or "half precision" not in str(exc):
+                raise
+            self.dtype = torch.float32
+            self.model = descriptor.to(self.device, dtype=self.dtype).eval()
+        self.technique = f"{descriptor.architecture.name} + PyTorch"
+
+        if backend == "tensorrt":
+            if self.device.type != "cuda":
+                raise RuntimeError("TensorRT upscaling requires a CUDA device")
+            if input_size is None:
+                raise ValueError("input_size is required for TensorRT upscaling")
+            self.model = self._compile_tensorrt(input_size)
+            self.technique = f"{descriptor.architecture.name} + TensorRT"
+
+    def _compile_tensorrt(self, input_size: tuple[int, int]):
+        import torch
+        try:
+            import torch_tensorrt
+        except ImportError as exc:
+            raise RuntimeError("torch-tensorrt is required for TensorRT upscaling") from exc
+        width, height = input_size
+        sample = torch.zeros((1, 3, height, width), device=self.device, dtype=self.dtype)
+        enabled_precisions = {self.dtype}
+        compile_target = getattr(self.model, "model", self.model)
+        return torch_tensorrt.compile(
+            compile_target,
+            ir="dynamo",
+            inputs=[sample],
+            enabled_precisions=enabled_precisions,
+            workspace_size=1 << 30,
+            min_block_size=1,
+        )
+
+    def upscale(self, frame: np.ndarray) -> np.ndarray:
+        import torch
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        tensor = torch.from_numpy(np.ascontiguousarray(rgb.transpose(2, 0, 1))).unsqueeze(0)
+        tensor = tensor.to(self.device, dtype=self.dtype).div_(255.0)
+        with torch.inference_mode():
+            output = self.model(tensor)
+        if isinstance(output, (tuple, list)):
+            output = output[0]
+        array = output[0].detach().float().clamp_(0, 1).cpu().numpy().transpose(1, 2, 0)
+        return cv2.cvtColor((array * 255.0 + 0.5).astype(np.uint8), cv2.COLOR_RGB2BGR)
+
+    def close(self) -> None:
+        self.model = None
+        try:
+            import torch
+            if self.device.type == "cuda":
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
+class ONNXUpscaler:
+    def __init__(self, model_path: Path, *, backend: str, gpu_id: int):
+        self._preload_nvidia_libraries()
+        try:
+            import onnxruntime as ort
+        except ImportError as exc:
+            raise RuntimeError("onnxruntime-gpu is required for ONNX upscalers") from exc
+        available = set(ort.get_available_providers())
+        if backend == "tensorrt":
+            if "TensorrtExecutionProvider" not in available:
+                raise RuntimeError("ONNX Runtime TensorRT execution provider is unavailable")
+            providers = [
+                ("TensorrtExecutionProvider", {
+                    "device_id": gpu_id,
+                    "trt_engine_cache_enable": True,
+                    "trt_engine_cache_path": str(model_path.parent / ".trt-cache"),
+                    "trt_fp16_enable": True,
+                }),
+                ("CUDAExecutionProvider", {"device_id": gpu_id}),
+                "CPUExecutionProvider",
+            ]
+            self.technique = "ONNX + TensorRT"
+        else:
+            providers = [("CUDAExecutionProvider", {"device_id": gpu_id}), "CPUExecutionProvider"]
+            self.technique = "ONNX Runtime"
+        self.session = ort.InferenceSession(str(model_path), providers=providers)
+        if backend == "tensorrt" and "TensorrtExecutionProvider" not in self.session.get_providers():
+            raise RuntimeError("ONNX Runtime failed to activate the TensorRT execution provider")
+        self.input_name = self.session.get_inputs()[0].name
+        self.input_type = self.session.get_inputs()[0].type
+        self.scale = self._detect_scale()
+
+    @staticmethod
+    def _preload_nvidia_libraries() -> None:
+        import ctypes
+        import site
+        try:
+            import torch
+            torch.cuda.init()
+        except Exception:
+            pass
+        for root in site.getsitepackages():
+            base = Path(root)
+            libraries = [
+                base / "tensorrt_libs" / "libnvinfer.so.10",
+                base / "tensorrt_libs" / "libnvonnxparser.so.10",
+                base / "tensorrt_libs" / "libnvinfer_plugin.so.10",
+                base / "nvidia" / "cudnn" / "lib" / "libcudnn.so.9",
+            ]
+            for library in libraries:
+                if library.exists():
+                    ctypes.CDLL(str(library), mode=ctypes.RTLD_GLOBAL)
+
+    def _detect_scale(self) -> int:
+        input_shape = self.session.get_inputs()[0].shape
+        output_shape = self.session.get_outputs()[0].shape
+        if all(isinstance(v, int) and v > 0 for v in (input_shape[-2], output_shape[-2])):
+            scale = int(output_shape[-2] // input_shape[-2])
+            if scale > 0:
+                return scale
+        name = Path(self.session._model_path).stem.lower()
+        import re
+        match = re.search(r"(?:^|[_-])(\d+)x|x(\d+)(?:[_-]|$)", name)
+        if match:
+            return int(match.group(1) or match.group(2))
+        raise RuntimeError("cannot determine ONNX upscaler scale")
+
+    def upscale(self, frame: np.ndarray) -> np.ndarray:
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        dtype = np.float16 if "float16" in self.input_type else np.float32
+        tensor = np.ascontiguousarray(rgb.transpose(2, 0, 1)[None]).astype(dtype) / dtype(255.0)
+        output = self.session.run(None, {self.input_name: tensor})[0]
+        array = np.asarray(output)[0].clip(0, 1).transpose(1, 2, 0)
+        return cv2.cvtColor((array * 255.0 + 0.5).astype(np.uint8), cv2.COLOR_RGB2BGR)
+
+    def close(self) -> None:
+        self.session = None
+
+
+def upscale_frame_tiled(frame: np.ndarray, upscaler: Upscaler, *, tile_size: int,
+                        overlap: int = 16) -> np.ndarray:
+    height, width = frame.shape[:2]
+    scale = upscaler.scale
+    output = np.empty((height * scale, width * scale, 3), dtype=np.uint8)
+    for top in range(0, height, tile_size):
+        for left in range(0, width, tile_size):
+            bottom = min(top + tile_size, height)
+            right = min(left + tile_size, width)
+            padded_top = max(0, top - overlap)
+            padded_left = max(0, left - overlap)
+            padded_bottom = min(height, bottom + overlap)
+            padded_right = min(width, right + overlap)
+            tile = frame[padded_top:padded_bottom, padded_left:padded_right]
+            pad_top = max(0, overlap - top)
+            pad_left = max(0, overlap - left)
+            pad_bottom = max(0, top + tile_size + overlap - height)
+            pad_right = max(0, left + tile_size + overlap - width)
+            missing_height = tile_size + 2 * overlap - tile.shape[0] - pad_top - pad_bottom
+            missing_width = tile_size + 2 * overlap - tile.shape[1] - pad_left - pad_right
+            pad_bottom += max(0, missing_height)
+            pad_right += max(0, missing_width)
+            tile = cv2.copyMakeBorder(
+                tile, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_REFLECT_101,
+            )
+            upscaled = upscaler.upscale(tile)
+            crop_top = (top - padded_top + pad_top) * scale
+            crop_left = (left - padded_left + pad_left) * scale
+            crop_bottom = crop_top + (bottom - top) * scale
+            crop_right = crop_left + (right - left) * scale
+            output[top * scale:bottom * scale, left * scale:right * scale] = (
+                upscaled[crop_top:crop_bottom, crop_left:crop_right]
+            )
+    return output
+
+
+def process_frames(source_frames: list[Path], output_dir: Path, upscaler: Upscaler,
+                   *, target_scale: int, preview_cb=None, progress_cb=None,
+                   tile_size: int = 0) -> UpscaleResult:
+    if not source_frames:
+        raise ValueError("no source frames to upscale")
+    if target_scale < 1:
+        raise ValueError("target_scale must be at least 1")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    first = cv2.imread(str(source_frames[0]), cv2.IMREAD_COLOR)
+    if first is None:
+        raise RuntimeError(f"cannot read frame: {source_frames[0]}")
+    source_height, source_width = first.shape[:2]
+    target_size = (source_width * target_scale, source_height * target_scale)
+    written: list[Path] = []
+    for index, path in enumerate(source_frames, start=1):
+        frame = first if index == 1 else cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if frame is None:
+            raise RuntimeError(f"cannot read frame: {path}")
+        output = (upscale_frame_tiled(frame, upscaler, tile_size=tile_size)
+                  if tile_size > 0 else upscaler.upscale(frame))
+        if (output.shape[1], output.shape[0]) != target_size:
+            output = cv2.resize(output, target_size, interpolation=cv2.INTER_LANCZOS4)
+        output_path = output_dir / f"{index:08d}.png"
+        if not cv2.imwrite(str(output_path), output):
+            raise RuntimeError(f"cannot write upscaled frame: {output_path}")
+        written.append(output_path)
+        if preview_cb is not None:
+            preview_cb(output)
+        if progress_cb is not None:
+            progress_cb(index, len(source_frames))
+    return UpscaleResult(written, target_size[0], target_size[1], upscaler.technique)
