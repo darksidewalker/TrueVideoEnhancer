@@ -32,9 +32,29 @@ class UpscaleResult:
 def choose_tile_size(width: int, height: int, *, requested: int, backend: str) -> int:
     if requested > 0:
         return requested
-    if backend == "tensorrt" and width * height > 512 * 512:
-        return 128
     return 0
+
+
+def tensorrt_compile_candidates(width: int, height: int, *, requested_tile: int,
+                                fixed_input_size: tuple[int, int] | None = None
+                                ) -> list[tuple[int, tuple[int, int]]]:
+    if fixed_input_size is not None:
+        if fixed_input_size[0] != fixed_input_size[1] or fixed_input_size[0] <= 32:
+            raise ValueError(f"unsupported static ONNX input shape: {fixed_input_size}")
+        return [(fixed_input_size[0] - 32, fixed_input_size)]
+    if requested_tile > 0:
+        return [(requested_tile, (requested_tile + 32, requested_tile + 32))]
+    if width * height > 512 * 512:
+        return [(0, (width, height)), (128, (160, 160))]
+    return [(0, (width, height))]
+
+
+def tensorrt_batch_size(input_size: tuple[int, int]) -> int:
+    return 8 if input_size[0] * input_size[1] <= 256 * 256 else 1
+
+
+def tensorrt_workspace_size(input_size: tuple[int, int]) -> int:
+    return (8 if input_size[0] * input_size[1] > 512 * 512 else 1) << 30
 
 
 def static_onnx_input_size(model_path: str | Path) -> tuple[int, int] | None:
@@ -85,6 +105,41 @@ def create_upscaler(model_path: str | Path, *, backend: str, device: str = "auto
     )
 
 
+def create_optimized_upscaler(model_path: str | Path, *, width: int, height: int,
+                              backend: str, requested_tile: int = 0,
+                              device: str = "auto", gpu_id: int = 0,
+                              precision: str = "float16", factory=None):
+    factory = factory or create_upscaler
+    fixed_size = static_onnx_input_size(model_path)
+    if backend == "tensorrt":
+        candidates = tensorrt_compile_candidates(
+            width, height, requested_tile=requested_tile, fixed_input_size=fixed_size,
+        )
+    else:
+        tile_size = fixed_size[0] - 32 if fixed_size else requested_tile
+        compile_size = fixed_size or (width, height)
+        candidates = [(tile_size, compile_size)]
+    failures = []
+    for index, (tile_size, compile_size) in enumerate(candidates):
+        try:
+            upscaler = factory(
+                model_path, backend=backend, device=device, gpu_id=gpu_id,
+                precision=precision, input_size=compile_size,
+            )
+            return upscaler, tile_size, compile_size, failures
+        except Exception as exc:
+            failures.append((compile_size, str(exc)))
+            if index + 1 >= len(candidates):
+                raise
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+            except Exception:
+                pass
+    raise RuntimeError("no upscaler compile candidates available")
+
+
 class SafetensorsUpscaler:
     def __init__(self, model_path: Path, *, backend: str, device: str,
                  precision: str, input_size: tuple[int, int] | None):
@@ -108,12 +163,14 @@ class SafetensorsUpscaler:
             self.dtype = torch.float32
             self.model = descriptor.to(self.device, dtype=self.dtype).eval()
         self.technique = f"{descriptor.architecture.name} + PyTorch"
+        self.batch_size = 1
 
         if backend == "tensorrt":
             if self.device.type != "cuda":
                 raise RuntimeError("TensorRT upscaling requires a CUDA device")
             if input_size is None:
                 raise ValueError("input_size is required for TensorRT upscaling")
+            self.batch_size = tensorrt_batch_size(input_size)
             self.model = self._compile_tensorrt(input_size)
             self.technique = f"{descriptor.architecture.name} + TensorRT"
 
@@ -124,7 +181,7 @@ class SafetensorsUpscaler:
         except ImportError as exc:
             raise RuntimeError("torch-tensorrt is required for TensorRT upscaling") from exc
         width, height = input_size
-        sample = torch.zeros((1, 3, height, width), device=self.device, dtype=self.dtype)
+        sample = torch.zeros((self.batch_size, 3, height, width), device=self.device, dtype=self.dtype)
         enabled_precisions = {self.dtype}
         compile_target = getattr(self.model, "model", self.model)
         return torch_tensorrt.compile(
@@ -132,21 +189,31 @@ class SafetensorsUpscaler:
             ir="dynamo",
             inputs=[sample],
             enabled_precisions=enabled_precisions,
-            workspace_size=1 << 30,
+            workspace_size=tensorrt_workspace_size(input_size),
             min_block_size=1,
         )
 
     def upscale(self, frame: np.ndarray) -> np.ndarray:
+        return self.upscale_batch([frame])[0]
+
+    def upscale_batch(self, frames: list[np.ndarray]) -> list[np.ndarray]:
         import torch
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        tensor = torch.from_numpy(np.ascontiguousarray(rgb.transpose(2, 0, 1))).unsqueeze(0)
+        if not frames:
+            return []
+        count = len(frames)
+        padded = frames + [frames[-1]] * (self.batch_size - count)
+        rgb = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).transpose(2, 0, 1) for frame in padded]
+        tensor = torch.from_numpy(np.ascontiguousarray(np.stack(rgb)))
         tensor = tensor.to(self.device, dtype=self.dtype).div_(255.0)
         with torch.inference_mode():
             output = self.model(tensor)
         if isinstance(output, (tuple, list)):
             output = output[0]
-        array = output[0].detach().float().clamp_(0, 1).cpu().numpy().transpose(1, 2, 0)
-        return cv2.cvtColor((array * 255.0 + 0.5).astype(np.uint8), cv2.COLOR_RGB2BGR)
+        arrays = output[:count].detach().float().clamp_(0, 1).cpu().numpy()
+        return [
+            cv2.cvtColor((array.transpose(1, 2, 0) * 255.0 + 0.5).astype(np.uint8), cv2.COLOR_RGB2BGR)
+            for array in arrays
+        ]
 
     def close(self) -> None:
         self.model = None
@@ -242,6 +309,7 @@ def upscale_frame_tiled(frame: np.ndarray, upscaler: Upscaler, *, tile_size: int
     height, width = frame.shape[:2]
     scale = upscaler.scale
     output = np.empty((height * scale, width * scale, 3), dtype=np.uint8)
+    pending = []
     for top in range(0, height, tile_size):
         for left in range(0, width, tile_size):
             bottom = min(top + tile_size, height)
@@ -262,11 +330,19 @@ def upscale_frame_tiled(frame: np.ndarray, upscaler: Upscaler, *, tile_size: int
             tile = cv2.copyMakeBorder(
                 tile, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_REFLECT_101,
             )
-            upscaled = upscaler.upscale(tile)
             crop_top = (top - padded_top + pad_top) * scale
             crop_left = (left - padded_left + pad_left) * scale
             crop_bottom = crop_top + (bottom - top) * scale
             crop_right = crop_left + (right - left) * scale
+            pending.append((tile, top, bottom, left, right, crop_top, crop_bottom, crop_left, crop_right))
+    batch_size = max(1, int(getattr(upscaler, "batch_size", 1)))
+    batch_method = getattr(upscaler, "upscale_batch", None)
+    for start in range(0, len(pending), batch_size):
+        items = pending[start:start + batch_size]
+        tiles = [item[0] for item in items]
+        upscaled_tiles = batch_method(tiles) if batch_method else [upscaler.upscale(tile) for tile in tiles]
+        for item, upscaled in zip(items, upscaled_tiles, strict=True):
+            _, top, bottom, left, right, crop_top, crop_bottom, crop_left, crop_right = item
             output[top * scale:bottom * scale, left * scale:right * scale] = (
                 upscaled[crop_top:crop_bottom, crop_left:crop_right]
             )
@@ -296,7 +372,7 @@ def process_frames(source_frames: list[Path], output_dir: Path, upscaler: Upscal
         if (output.shape[1], output.shape[0]) != target_size:
             output = cv2.resize(output, target_size, interpolation=cv2.INTER_LANCZOS4)
         output_path = output_dir / f"{index:08d}.png"
-        if not cv2.imwrite(str(output_path), output):
+        if not cv2.imwrite(str(output_path), output, [cv2.IMWRITE_PNG_COMPRESSION, 0]):
             raise RuntimeError(f"cannot write upscaled frame: {output_path}")
         written.append(output_path)
         if preview_cb is not None:

@@ -64,7 +64,10 @@ except Exception as exc:  # pragma: no cover - full error emitted on actual use
 else:
     MODEL_LOADER_ERROR = None
 
-from upscale_inference import choose_tile_size, create_upscaler, process_frames, static_onnx_input_size
+from upscale_inference import create_optimized_upscaler
+from streaming_pipeline import (
+    FrameProcessor, RawVideoReader, RawVideoWriter, encode_command, stream_frames,
+)
 
 VERSION = "0.2.0"
 SUPPORTED_VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"}
@@ -576,74 +579,69 @@ def render(args) -> None:
     if factor > 1.0 and not args.interpolate_model:
         raise RuntimeError("--interpolate_model is required for frame interpolation")
 
-    with tempfile.TemporaryDirectory(prefix="dasiwa-rife-") as td:
-        temp = Path(td)
-        src = extract_source_frames(args.input, temp / "source")
-        generated_dir = temp / "generated"
-        if factor > 1.0:
-            interpolator = build_interpolator(args, info["width"], info["height"])
-            count = write_target_frames(
-                src, generated_dir, info["fps"], output_fps, interpolator,
-                preview_enabled=not bool(args.upscale_model),
-            )
-        else:
-            count = write_source_cadence_frames(
-                src, generated_dir, preview_enabled=not bool(args.upscale_model),
-                progress_enabled=not bool(args.upscale_model),
-            )
-        frame_dir = generated_dir
-        if args.upscale_model:
-            model_path = resolve_model_path(args.upscale_model)
-            log("MODEL", f"upscaler={Path(model_path).name}", detail=f"path={model_path}")
-            fixed_onnx_size = static_onnx_input_size(model_path)
-            if fixed_onnx_size:
-                if fixed_onnx_size[0] != fixed_onnx_size[1] or fixed_onnx_size[0] <= 32:
-                    raise RuntimeError(f"unsupported static ONNX input shape: {fixed_onnx_size}")
-                tile_size = fixed_onnx_size[0] - 32
-                compile_size = fixed_onnx_size
-                log("MODEL", "Static ONNX input detected",
-                    detail=f"input={compile_size[0]}x{compile_size[1]} core_tile={tile_size}")
-            else:
-                tile_size = choose_tile_size(
-                    info["width"], info["height"], requested=args.tilesize, backend=args.backend,
-                )
-                compile_size = ((tile_size + 32, tile_size + 32)
-                                if tile_size > 0 else (info["width"], info["height"]))
-            if tile_size > 0:
-                log("UPSCALE", f"tile_size={tile_size} overlap=16",
-                    detail=f"TensorRT input={compile_size[0]}x{compile_size[1]}")
-            log("ENGINE", "Preparing AI upscaler; TensorRT first run can take several minutes",
-                detail=f"model={Path(model_path).name} input={compile_size[0]}x{compile_size[1]} precision={args.precision}")
-            compile_started = time.monotonic()
-            upscaler = create_upscaler(
-                model_path, backend=args.backend, device=args.device,
-                gpu_id=args.pytorch_gpu_id, precision=args.precision,
-                input_size=compile_size,
-            )
-            log("ENGINE", "TensorRT upscaler ready",
-                detail=f"technique={upscaler.technique} elapsed={time.monotonic() - compile_started:.1f}s")
-            log("UPSCALE", f"output_frames={count} processing_started",
-                detail=f"preview=AI-processed output target={output_width}x{output_height}")
-            try:
-                result = process_frames(
-                    sorted(generated_dir.glob("*.png")), temp / "upscaled", upscaler,
-                    target_scale=target_scale, preview_cb=emit_live_preview,
-                    progress_cb=lambda done, total: log("UPSCALE", f"wrote {done}/{total} frames"),
-                    tile_size=tile_size,
-                )
-                model_scale = upscaler.scale
-            finally:
-                upscaler.close()
-            frame_dir = temp / "upscaled"
-            output_width, output_height = result.width, result.height
-            log("UPSCALE", f"actual_technique={result.technique}",
-                detail=f"frames={len(result.frames)} model_scale={model_scale} target_scale={target_scale}")
-        encode_video(
-            args.input, args.output, frame_dir, output_fps,
-            args.crf, args.video_encoder_preset, args.video_pixel_format,
-            args.audio_encoder_preset, args.subtitle_encoder_preset, args.audio_bitrate,
-            output_width, output_height,
+    interpolator = build_interpolator(args, info["width"], info["height"]) if factor > 1.0 else None
+    upscaler = None
+    tile_size = 0
+    if args.upscale_model:
+        model_path = resolve_model_path(args.upscale_model)
+        log("MODEL", f"upscaler={Path(model_path).name}", detail=f"path={model_path}")
+        log("ENGINE", "Preparing optimized AI upscaler; full-frame TensorRT is preferred",
+            detail=f"model={Path(model_path).name} input={info['width']}x{info['height']} precision={args.precision}")
+        compile_started = time.monotonic()
+        upscaler, tile_size, compile_size, compile_failures = create_optimized_upscaler(
+            model_path, width=info["width"], height=info["height"],
+            backend=args.backend, requested_tile=args.tilesize, device=args.device,
+            gpu_id=args.pytorch_gpu_id, precision=args.precision,
         )
+        for failed_size, reason in compile_failures:
+            log("WARN", "Full-frame TensorRT unavailable; retrying safe fixed tiles",
+                detail=f"input={failed_size[0]}x{failed_size[1]} reason={reason}")
+        mode = "full-frame" if tile_size == 0 else f"tiled core={tile_size} overlap=16"
+        log("ENGINE", "AI upscaler ready",
+            detail=f"technique={upscaler.technique} mode={mode} input={compile_size[0]}x{compile_size[1]} batch={getattr(upscaler, 'batch_size', 1)} elapsed={time.monotonic() - compile_started:.1f}s")
+
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+    processor = FrameProcessor(
+        interpolator=interpolator, upscaler=upscaler, tile_size=tile_size,
+        target_size=(output_width, output_height), to_tensor=_to_tensor, to_bgr=_to_bgr,
+    )
+    reader = RawVideoReader(args.input, width=info["width"], height=info["height"], queue_size=3)
+    writer = RawVideoWriter(encode_command(
+        args.input, args.output, width=output_width, height=output_height, fps=output_fps,
+        video_args=encoder_args(args.video_encoder_preset, args.crf, args.video_pixel_format),
+        audio_args=audio_args(args.audio_encoder_preset, args.audio_bitrate),
+        subtitle_args=subtitle_args(args.subtitle_encoder_preset),
+    ), queue_size=3)
+    estimated_count = max(1, int(math.floor(info["duration"] * output_fps + 1e-6)))
+    log("PIPE", f"streaming output_frames≈{estimated_count} target_fps={output_fps:.6g}",
+        detail=f"decode=FFmpeg rawvideo queue=3 AI=fused encode={resolved_codec} queue=3 no_PNG_intermediates")
+    started = time.monotonic()
+    def progress(done: int) -> None:
+        if done == 1 or done % 10 == 0:
+            elapsed = max(time.monotonic() - started, 1e-6)
+            log("PIPE", f"processed {done}/{estimated_count} frames",
+                detail=f"throughput={done / elapsed:.2f} fps")
+    preview_count = 0
+    def preview(frame) -> None:
+        nonlocal preview_count
+        if preview_count % 10 == 0:
+            emit_live_preview(frame)
+        preview_count += 1
+    try:
+        writer.start()
+        reader.start()
+        count = stream_frames(
+            reader, writer, processor, source_fps=info["fps"], target_fps=output_fps,
+            progress_cb=progress, preview_cb=preview,
+        )
+        writer.finish()
+    finally:
+        reader.close()
+        writer.close()
+        if upscaler is not None:
+            upscaler.close()
+    log("DONE", f"output={args.output}",
+        detail=f"frames={count} resolution={output_width}x{output_height} streaming=true")
     print(json.dumps({"status": "success", "output": args.output, "target_fps": output_fps, "frames": count, "width": output_width, "height": output_height}))
 
 

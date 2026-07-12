@@ -1,0 +1,232 @@
+from __future__ import annotations
+
+import math
+import queue
+import shutil
+import subprocess
+import threading
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable, Iterable
+
+import cv2
+import numpy as np
+
+from upscale_inference import upscale_frame_tiled
+
+_SENTINEL = object()
+
+
+def _ffmpeg() -> str:
+    path = shutil.which("ffmpeg")
+    if not path:
+        raise RuntimeError("ffmpeg not found on PATH")
+    return path
+
+
+def decode_command(input_video: str, *, width: int, height: int) -> list[str]:
+    return [
+        _ffmpeg(), "-hide_banner", "-loglevel", "error", "-i", input_video,
+        "-map", "0:v:0", "-vsync", "0", "-pix_fmt", "bgr24", "-f", "rawvideo", "-",
+    ]
+
+
+def _fps_string(fps: float) -> str:
+    return f"{fps:.6f}".rstrip("0").rstrip(".")
+
+
+def encode_command(input_video: str, output_video: str, *, width: int, height: int,
+                   fps: float, video_args: list[str], audio_args: list[str],
+                   subtitle_args: list[str]) -> list[str]:
+    return [
+        _ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{width}x{height}",
+        "-r", _fps_string(fps), "-i", "-", "-i", input_video,
+        "-map", "0:v:0", "-map", "1:a?", "-map", "1:s?",
+        *video_args, *audio_args, *subtitle_args, output_video,
+    ]
+
+
+def frame_from_bytes(data: bytes, *, width: int, height: int) -> np.ndarray:
+    expected = width * height * 3
+    if len(data) != expected:
+        raise ValueError(f"raw frame has {len(data)} bytes, expected {expected}")
+    return np.frombuffer(data, dtype=np.uint8).reshape(height, width, 3).copy()
+
+
+def output_schedule(*, source_count: int, source_fps: float,
+                    target_fps: float) -> Iterable[tuple[int, int, float]]:
+    duration = (source_count - 1) / source_fps if source_count > 1 else 0.0
+    count = max(1, int(math.floor(duration * target_fps + 1e-6)) + 1)
+    for output_index in range(count):
+        position = min(output_index * source_fps / target_fps, source_count - 1)
+        left = int(math.floor(position))
+        right = min(left + 1, source_count - 1)
+        timestep = float(position - left) if right != left else 0.0
+        yield left, right, timestep
+
+
+@dataclass
+class FrameProcessor:
+    interpolator: object | None
+    upscaler: object | None
+    tile_size: int
+    target_size: tuple[int, int]
+    to_tensor: Callable[[np.ndarray], object]
+    to_bgr: Callable[[object], np.ndarray]
+
+    def process(self, frame_a: np.ndarray, frame_b: np.ndarray, timestep: float) -> np.ndarray:
+        if self.interpolator is not None and 1e-5 < timestep < 1.0 - 1e-5:
+            output = self.to_bgr(self.interpolator.interpolate(
+                self.to_tensor(frame_a), self.to_tensor(frame_b), timestep=timestep,
+            ))
+        elif timestep >= 1.0 - 1e-5:
+            output = frame_b
+        else:
+            output = frame_a
+        if self.upscaler is not None:
+            output = (upscale_frame_tiled(output, self.upscaler, tile_size=self.tile_size)
+                      if self.tile_size > 0 else self.upscaler.upscale(output))
+        if (output.shape[1], output.shape[0]) != self.target_size:
+            output = cv2.resize(output, self.target_size, interpolation=cv2.INTER_LANCZOS4)
+        return np.ascontiguousarray(output)
+
+
+class _ProcessWorker:
+    def __init__(self, command: list[str], *, read: bool, queue_size: int):
+        self.command = command
+        self.read = read
+        self.queue: queue.Queue = queue.Queue(maxsize=queue_size)
+        self.error: BaseException | None = None
+        self.process: subprocess.Popen | None = None
+        self.thread: threading.Thread | None = None
+
+    def raise_if_failed(self) -> None:
+        if self.error is not None:
+            raise RuntimeError(str(self.error)) from self.error
+
+
+class RawVideoReader(_ProcessWorker):
+    def __init__(self, input_video: str, *, width: int, height: int, queue_size: int = 3):
+        super().__init__(decode_command(input_video, width=width, height=height), read=True,
+                         queue_size=queue_size)
+        self.width, self.height = width, height
+
+    def start(self) -> None:
+        self.process = subprocess.Popen(self.command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.thread = threading.Thread(target=self._run, name="ffmpeg-raw-reader", daemon=True)
+        self.thread.start()
+
+    def _run(self) -> None:
+        assert self.process is not None and self.process.stdout is not None
+        size = self.width * self.height * 3
+        try:
+            while True:
+                data = self.process.stdout.read(size)
+                if not data:
+                    break
+                if len(data) != size:
+                    raise RuntimeError(f"decoder returned partial raw frame ({len(data)}/{size} bytes)")
+                self.queue.put(frame_from_bytes(data, width=self.width, height=self.height))
+            stderr = self.process.stderr.read().decode(errors="replace") if self.process.stderr else ""
+            code = self.process.wait()
+            if code != 0:
+                raise RuntimeError(f"ffmpeg decode failed: {stderr.strip()}")
+        except BaseException as exc:
+            self.error = exc
+        finally:
+            self.queue.put(_SENTINEL)
+
+    def frames(self):
+        while True:
+            item = self.queue.get()
+            if item is _SENTINEL:
+                self.raise_if_failed()
+                return
+            yield item
+
+    def close(self) -> None:
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
+        if self.thread:
+            self.thread.join(timeout=5)
+
+
+class RawVideoWriter(_ProcessWorker):
+    def __init__(self, command: list[str], *, queue_size: int = 3):
+        super().__init__(command, read=False, queue_size=queue_size)
+
+    def start(self) -> None:
+        self.process = subprocess.Popen(self.command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.thread = threading.Thread(target=self._run, name="ffmpeg-raw-writer", daemon=True)
+        self.thread.start()
+
+    def _run(self) -> None:
+        assert self.process is not None and self.process.stdin is not None
+        try:
+            while True:
+                item = self.queue.get()
+                if item is _SENTINEL:
+                    break
+                self.process.stdin.write(item.tobytes())
+            self.process.stdin.close()
+            stderr = self.process.stderr.read().decode(errors="replace") if self.process.stderr else ""
+            code = self.process.wait()
+            if code != 0:
+                raise RuntimeError(f"ffmpeg encode failed: {stderr.strip()}")
+        except BaseException as exc:
+            self.error = exc
+            if self.process.poll() is None:
+                self.process.terminate()
+
+    def put(self, frame: np.ndarray) -> None:
+        self.raise_if_failed()
+        self.queue.put(frame)
+
+    def finish(self) -> None:
+        self.queue.put(_SENTINEL)
+        if self.thread:
+            self.thread.join()
+        self.raise_if_failed()
+
+    def close(self) -> None:
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=5)
+
+
+def stream_frames(reader: RawVideoReader, writer: RawVideoWriter, processor: FrameProcessor,
+                  *, source_fps: float, target_fps: float,
+                  progress_cb: Callable[[int], None] | None = None,
+                  preview_cb: Callable[[np.ndarray], None] | None = None) -> int:
+    frames = iter(reader.frames())
+    try:
+        current = next(frames)
+    except StopIteration:
+        raise RuntimeError("decoder produced no video frames")
+    source_index = 0
+    output_index = 0
+    next_output_position = 0.0
+    for following in frames:
+        while next_output_position < source_index + 1.0 - 1e-9:
+            timestep = next_output_position - source_index
+            output = processor.process(current, following, timestep)
+            writer.put(output)
+            output_index += 1
+            if preview_cb is not None:
+                preview_cb(output)
+            if progress_cb is not None:
+                progress_cb(output_index)
+            next_output_position = output_index * source_fps / target_fps
+        current = following
+        source_index += 1
+    if next_output_position <= source_index + 1e-6:
+        output = processor.process(current, current, 0.0)
+        writer.put(output)
+        output_index += 1
+        if preview_cb is not None:
+            preview_cb(output)
+        if progress_cb is not None:
+            progress_cb(output_index)
+    return output_index

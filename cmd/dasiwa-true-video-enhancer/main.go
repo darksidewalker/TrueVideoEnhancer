@@ -8,8 +8,10 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -88,11 +90,46 @@ func run() error {
 	}()
 
 	log.Printf("DaSiWa True Video Enhancer v%s listening on http://127.0.0.1:%s", version, port)
+	url := "http://127.0.0.1:" + port
+	if shouldOpenBrowser() {
+		go openBrowserWhenReady(url)
+	}
 
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("listen: %w", err)
 	}
 	return nil
+}
+
+func shouldOpenBrowser() bool {
+	value := strings.ToLower(strings.TrimSpace(os.Getenv("DASIWA_NO_BROWSER")))
+	return value != "1" && value != "true" && value != "yes"
+}
+
+func openBrowserWhenReady(url string) {
+	client := http.Client{Timeout: 500 * time.Millisecond}
+	for attempt := 0; attempt < 20; attempt++ {
+		response, err := client.Get(url + "/api/health")
+		if err == nil {
+			_ = response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	var command *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		command = exec.Command("open", url)
+	case "windows":
+		command = exec.Command("rundll32", "url.dll,FileProtocolHandler", url)
+	default:
+		command = exec.Command("xdg-open", url)
+	}
+	if err := command.Start(); err != nil {
+		log.Printf("could not open browser automatically: %v", err)
+	}
 }
 
 // appName returns the binary name.
@@ -107,8 +144,8 @@ func appName() string {
 // folder instead of dist/models/.
 func resolveRepoRoot() string {
 	candidates := []string{
-		".",                              // cwd
-		filepath.Dir(os.Args[0]),         // next to the binary
+		".",                      // cwd
+		filepath.Dir(os.Args[0]), // next to the binary
 		filepath.Dir(filepath.Dir(os.Args[0])),
 	}
 	for _, c := range candidates {

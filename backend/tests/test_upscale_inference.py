@@ -27,6 +27,17 @@ class FakeUpscaler:
         pass
 
 
+class FakeBatchUpscaler(FakeUpscaler):
+    batch_size = 4
+
+    def __init__(self):
+        self.batch_calls = []
+
+    def upscale_batch(self, frames):
+        self.batch_calls.append(len(frames))
+        return [self.upscale(frame) for frame in frames]
+
+
 def test_rejects_legacy_pth_models(module, tmp_path):
     model = tmp_path / "legacy.pth"
     model.write_bytes(b"legacy")
@@ -88,10 +99,73 @@ def test_tiled_upscale_covers_frame_without_changing_dimensions(module):
     assert np.array_equal(output, expected)
 
 
+def test_tiled_upscale_batches_tiles_for_gpu_throughput(module):
+    frame = np.arange(17 * 17 * 3, dtype=np.uint8).reshape(17, 17, 3)
+    upscaler = FakeBatchUpscaler()
+
+    output = module.upscale_frame_tiled(frame, upscaler, tile_size=4, overlap=1)
+
+    expected = cv2.resize(frame, None, fx=2, fy=2, interpolation=cv2.INTER_NEAREST)
+    assert np.array_equal(output, expected)
+    assert upscaler.batch_calls == [4, 4, 4, 4, 4, 4, 1]
+
+
 def test_auto_tile_avoids_full_frame_tensorrt_compile_for_large_input(module):
-    assert module.choose_tile_size(704, 896, requested=0, backend="tensorrt") == 128
+    assert module.choose_tile_size(704, 896, requested=0, backend="tensorrt") == 0
     assert module.choose_tile_size(32, 24, requested=0, backend="tensorrt") == 0
     assert module.choose_tile_size(704, 896, requested=256, backend="tensorrt") == 256
+
+
+def test_tensorrt_compile_candidates_try_full_frame_then_safe_tiles(module):
+    assert module.tensorrt_compile_candidates(1088, 1920, requested_tile=0) == [
+        (0, (1088, 1920)),
+        (128, (160, 160)),
+    ]
+
+
+def test_explicit_tile_does_not_attempt_full_frame(module):
+    assert module.tensorrt_compile_candidates(1088, 1920, requested_tile=256) == [
+        (256, (288, 288)),
+    ]
+
+
+def test_static_onnx_shape_uses_only_matching_tiles(module):
+    assert module.tensorrt_compile_candidates(
+        1088, 1920, requested_tile=0, fixed_input_size=(256, 256),
+    ) == [(224, (256, 256))]
+
+
+def test_full_frame_engine_uses_batch_one_while_tiles_use_batch_eight(module):
+    assert module.tensorrt_batch_size((1088, 1920)) == 1
+    assert module.tensorrt_batch_size((160, 160)) == 8
+
+
+def test_full_frame_engine_gets_larger_tactic_workspace(module):
+    assert module.tensorrt_workspace_size((1088, 1920)) == 8 << 30
+    assert module.tensorrt_workspace_size((160, 160)) == 1 << 30
+
+
+def test_create_optimized_upscaler_falls_back_from_full_frame_to_tiles(module, tmp_path):
+    model = tmp_path / "model.safetensors"
+    model.write_bytes(b"model")
+    attempts = []
+
+    def factory(path, **kwargs):
+        attempts.append(kwargs["input_size"])
+        if kwargs["input_size"] == (1088, 1920):
+            raise RuntimeError("TensorRT out of memory")
+        return FakeBatchUpscaler()
+
+    upscaler, tile_size, compile_size, failures = module.create_optimized_upscaler(
+        model, width=1088, height=1920, backend="tensorrt", requested_tile=0,
+        factory=factory,
+    )
+
+    assert isinstance(upscaler, FakeBatchUpscaler)
+    assert attempts == [(1088, 1920), (160, 160)]
+    assert tile_size == 128
+    assert compile_size == (160, 160)
+    assert failures == [((1088, 1920), "TensorRT out of memory")]
 
 
 def test_static_onnx_input_size_detects_fixed_nchw_shape(module, tmp_path):
@@ -125,3 +199,19 @@ def test_process_frames_reports_actual_upscale_progress(module, tmp_path):
     )
 
     assert progress == [(1, 2), (2, 2)]
+
+
+def test_process_frames_uses_fast_lossless_temp_png_writes(module, tmp_path, monkeypatch):
+    source = tmp_path / "source.png"
+    cv2.imwrite(str(source), np.zeros((2, 2, 3), np.uint8))
+    real_imwrite = cv2.imwrite
+    options = []
+
+    def recording_imwrite(path, frame, params=None):
+        options.append(params)
+        return real_imwrite(path, frame, params or [])
+
+    monkeypatch.setattr(module.cv2, "imwrite", recording_imwrite)
+    module.process_frames([source], tmp_path / "output", FakeUpscaler(), target_scale=2)
+
+    assert options == [[cv2.IMWRITE_PNG_COMPRESSION, 0]]
