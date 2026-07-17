@@ -182,13 +182,11 @@ class SafetensorsUpscaler:
             raise RuntimeError("torch-tensorrt is required for TensorRT upscaling") from exc
         width, height = input_size
         sample = torch.zeros((self.batch_size, 3, height, width), device=self.device, dtype=self.dtype)
-        enabled_precisions = {self.dtype}
         compile_target = getattr(self.model, "model", self.model)
         return torch_tensorrt.compile(
             compile_target,
             ir="dynamo",
             inputs=[sample],
-            enabled_precisions=enabled_precisions,
             workspace_size=tensorrt_workspace_size(input_size),
             min_block_size=1,
         )

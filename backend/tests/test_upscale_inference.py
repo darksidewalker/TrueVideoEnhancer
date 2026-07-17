@@ -1,6 +1,7 @@
 import importlib
 from pathlib import Path
 import sys
+import types
 
 import cv2
 import numpy as np
@@ -44,6 +45,24 @@ def test_rejects_legacy_pth_models(module, tmp_path):
 
     with pytest.raises(ValueError, match="safetensors.*onnx"):
         module.create_upscaler(model, backend="pytorch")
+
+
+def test_tensorrt_compile_uses_model_dtype_without_enabled_precisions(module, monkeypatch):
+    torch = importlib.import_module("torch")
+    calls = []
+    monkeypatch.setitem(sys.modules, "torch_tensorrt", types.SimpleNamespace(
+        compile=lambda model, **kwargs: calls.append((model, kwargs)) or model,
+    ))
+    upscaler = object.__new__(module.SafetensorsUpscaler)
+    upscaler.batch_size = 1
+    upscaler.device = torch.device("cpu")
+    upscaler.dtype = torch.float16
+    upscaler.model = torch.nn.Identity()
+
+    upscaler._compile_tensorrt((16, 16))
+
+    assert calls[0][1]["inputs"][0].dtype == torch.float16
+    assert "enabled_precisions" not in calls[0][1]
 
 
 def test_process_frames_runs_model_and_returns_persistent_output(module, tmp_path):
