@@ -7,8 +7,10 @@ func TestBuiltInUpscalersStartWithNativeRealtimePairPerContentType(t *testing.T)
 	want := []struct {
 		id, subcategory, scale string
 	}{
+		{"animejanai-hd-v3-compact-2x", "anime", "2x"},
 		{"anime-sharp-v4-2x", "anime", "2x"},
 		{"nomosuni-span-anime-4x", "anime", "4x"},
+		{"animejanai-hd-v3-compact-mixed-2x", "mixed", "2x"},
 		{"nomosuni-span-2x", "mixed", "2x"},
 		{"ultrasharpv2-4x", "mixed", "4x"},
 		{"realplksr-restoration-2x", "realism", "2x"},

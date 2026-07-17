@@ -71,3 +71,25 @@ def test_fused_processor_runs_interpolation_then_upscale():
     output = processor.process(a, b, 0.5)
     assert output.shape == (4, 6, 3)
     assert calls == [("rife", 0.5), ("upscale", (2, 3, 3))]
+
+
+def test_fused_processor_runs_a_2x_model_twice_for_a_4x_target():
+    calls = []
+
+    class Upscaler:
+        scale = 2
+        technique = "fake upscale"
+
+        def upscale(self, frame):
+            calls.append(frame.shape)
+            return np.repeat(np.repeat(frame, 2, axis=0), 2, axis=1)
+
+    frame = np.zeros((2, 3, 3), np.uint8)
+    processor = module().FrameProcessor(
+        interpolator=None, upscaler=Upscaler(), tile_size=0,
+        target_size=(12, 8), to_tensor=lambda value: value, to_bgr=lambda value: value,
+    )
+    output = processor.process(frame, frame, 0.0)
+
+    assert output.shape == (8, 12, 3)
+    assert calls == [(2, 3, 3), (4, 6, 3)]

@@ -367,8 +367,10 @@ def process_frames(source_frames: list[Path], output_dir: Path, upscaler: Upscal
         frame = first if index == 1 else cv2.imread(str(path), cv2.IMREAD_COLOR)
         if frame is None:
             raise RuntimeError(f"cannot read frame: {path}")
-        output = (upscale_frame_tiled(frame, upscaler, tile_size=tile_size)
-                  if tile_size > 0 else upscaler.upscale(frame))
+        output = frame
+        while output.shape[1] < target_size[0] or output.shape[0] < target_size[1]:
+            output = (upscale_frame_tiled(output, upscaler, tile_size=tile_size)
+                      if tile_size > 0 else upscaler.upscale(output))
         if (output.shape[1], output.shape[0]) != target_size:
             output = cv2.resize(output, target_size, interpolation=cv2.INTER_LANCZOS4)
         output_path = output_dir / f"{index:08d}.png"

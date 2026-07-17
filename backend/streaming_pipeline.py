@@ -12,7 +12,7 @@ from typing import Callable, Iterable
 import cv2
 import numpy as np
 
-from upscale_inference import upscale_frame_tiled
+from upscale_inference import Upscaler, upscale_frame_tiled
 
 _SENTINEL = object()
 
@@ -69,11 +69,20 @@ def output_schedule(*, source_count: int, source_fps: float,
 @dataclass
 class FrameProcessor:
     interpolator: object | None
-    upscaler: object | None
+    upscaler: Upscaler | None
     tile_size: int
     target_size: tuple[int, int]
     to_tensor: Callable[[np.ndarray], object]
     to_bgr: Callable[[object], np.ndarray]
+
+    def upscale(self, frame: np.ndarray) -> np.ndarray:
+        if self.upscaler is None:
+            return frame
+        output = frame
+        while output.shape[1] < self.target_size[0] or output.shape[0] < self.target_size[1]:
+            output = (upscale_frame_tiled(output, self.upscaler, tile_size=self.tile_size)
+                      if self.tile_size > 0 else self.upscaler.upscale(output))
+        return output
 
     def process(self, frame_a: np.ndarray, frame_b: np.ndarray, timestep: float) -> np.ndarray:
         if self.interpolator is not None and 1e-5 < timestep < 1.0 - 1e-5:
@@ -84,9 +93,7 @@ class FrameProcessor:
             output = frame_b
         else:
             output = frame_a
-        if self.upscaler is not None:
-            output = (upscale_frame_tiled(output, self.upscaler, tile_size=self.tile_size)
-                      if self.tile_size > 0 else self.upscaler.upscale(output))
+        output = self.upscale(output)
         if (output.shape[1], output.shape[0]) != self.target_size:
             output = cv2.resize(output, self.target_size, interpolation=cv2.INTER_LANCZOS4)
         return np.ascontiguousarray(output)

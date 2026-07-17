@@ -201,6 +201,21 @@ def test_process_frames_reports_actual_upscale_progress(module, tmp_path):
     assert progress == [(1, 2), (2, 2)]
 
 
+def test_process_frames_runs_a_2x_model_twice_for_a_4x_target(module, tmp_path):
+    source_dir = tmp_path / "source"
+    output_dir = tmp_path / "output"
+    source_dir.mkdir()
+    cv2.imwrite(str(source_dir / "00000001.png"), np.full((2, 3, 3), 127, dtype=np.uint8))
+
+    result = module.process_frames(
+        sorted(source_dir.glob("*.png")), output_dir, FakeUpscaler(), target_scale=4,
+    )
+
+    written = cv2.imread(str(result.frames[0]))
+    assert written.shape[:2] == (8, 12)
+    assert (result.width, result.height) == (12, 8)
+
+
 def test_process_frames_uses_fast_lossless_temp_png_writes(module, tmp_path, monkeypatch):
     source = tmp_path / "source.png"
     cv2.imwrite(str(source), np.zeros((2, 2, 3), np.uint8))

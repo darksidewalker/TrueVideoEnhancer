@@ -395,12 +395,14 @@ func builtInModelChoices(modelsDir string) []ModelChoice {
 	files := []struct{ id, name, file, category, subcategory, urlOverride string }{
 		// Recommended video upscalers come first in each content/scale bucket: Auto routing picks the first exact match.
 		// Anime: compression-trained native models; the 4x ONNX graph has a fixed 256x256 input.
+		{"animejanai-hd-v3-compact-2x", "AnimeJaNai HD V3 Compact 2x (Ultra Fast Anime/Mixed)", "2x-AnimeJaNai_HD_V3_Compact.safetensors", "upscaler", "anime", ""},
 		{"anime-sharp-v4-2x", "AnimeSharpV4 Fast RCAN-PU 2x (Video)", "2x-AnimeSharpV4_Fast_RCAN_PU.safetensors", "upscaler", "anime", hfBase + "Kim2091/2x-AnimeSharpV4/resolve/main/2x-AnimeSharpV4_Fast_RCAN_PU.safetensors"},
 		{"anime-sharp-v4-quality-2x", "AnimeSharpV4 RCAN 2x (Quality)", "2x-AnimeSharpV4_RCAN.safetensors", "upscaler", "anime", hfBase + "Kim2091/2x-AnimeSharpV4/resolve/main/2x-AnimeSharpV4_RCAN.safetensors"},
 		{"nomosuni-span-anime-4x", "NomosUni SPAN Multi-JPEG 4x (Fast)", "4xNomosUni_span_multijpg_fp16_opset17.onnx", "upscaler", "anime", phhofmBase + "4xNomosUni_span_multijpg/4xNomosUni_span_multijpg_fp16_opset17.onnx"},
 		{"anime-restoration-4x", "HFA2k LUDVAE RealPLKSR 4x (Video)", "4xHFA2k_ludvae_realplksr_dysample_256_fp16_fullyoptimized.onnx", "upscaler", "anime", phhofmBase + "4xHFA2k_ludvae_realplksr_dysample/4xHFA2k_ludvae_realplksr_dysample_256_fp16_fullyoptimized.onnx"},
 
 		// Mixed: fast SPAN restoration for 2x and broad-content RealPLKSR-Lite restoration for 4x.
+		{"animejanai-hd-v3-compact-mixed-2x", "AnimeJaNai HD V3 Compact 2x (Ultra Fast Anime/Mixed)", "2x-AnimeJaNai_HD_V3_Compact.safetensors", "upscaler", "mixed", ""},
 		{"nomosuni-span-2x", "NomosUni SPAN Multi-JPEG 2x (Fast)", "2xNomosUni_span_multijpg_fp16_opset17.onnx", "upscaler", "mixed", phhofmBase + "2xNomosUni_span_multijpg/2xNomosUni_span_multijpg_fp16_opset17.onnx"},
 		{"nomosuni-span-4x", "NomosUni SPAN Multi-JPEG 4x (Fast)", "4xNomosUni_span_multijpg_fp16_opset17.onnx", "upscaler", "mixed", phhofmBase + "4xNomosUni_span_multijpg/4xNomosUni_span_multijpg_fp16_opset17.onnx"},
 		{"ultrasharpv2-4x", "UltraSharpV2-Lite RealPLKSR 4x (Video)", "4x-UltraSharpV2_Lite.safetensors", "upscaler", "mixed", hfBase + "Kim2091/UltraSharpV2/resolve/main/4x-UltraSharpV2_Lite.safetensors"},
