@@ -93,3 +93,40 @@ def test_fused_processor_runs_a_2x_model_twice_for_a_4x_target():
 
     assert output.shape == (8, 12, 3)
     assert calls == [(2, 3, 3), (4, 6, 3)]
+
+
+def test_fused_processor_keeps_iterative_tensor_upscale_on_gpu_until_final_frame():
+    calls = []
+
+    class TensorUpscaler:
+        scale = 2
+        technique = "fake CUDA upscale"
+        supports_tensor_pipeline = True
+
+        def frame_to_tensor(self, frame):
+            calls.append(("upload", frame.shape))
+            return frame.transpose(2, 0, 1)[None]
+
+        def upscale_tensor_tiled(self, tensor, tile_size):
+            calls.append(("upscale", tensor.shape, tile_size))
+            return np.repeat(np.repeat(tensor, 2, axis=2), 2, axis=3)
+
+        def tensor_to_frame(self, tensor):
+            calls.append(("download", tensor.shape))
+            return tensor[0].transpose(1, 2, 0)
+
+    frame = np.zeros((2, 3, 3), np.uint8)
+    processor = module().FrameProcessor(
+        interpolator=None, upscaler=TensorUpscaler(), tile_size=128,
+        target_size=(12, 8), to_tensor=lambda value: value, to_bgr=lambda value: value,
+    )
+
+    output = processor.process(frame, frame, 0.0)
+
+    assert output.shape == (8, 12, 3)
+    assert calls == [
+        ("upload", (2, 3, 3)),
+        ("upscale", (1, 3, 2, 3), 128),
+        ("upscale", (1, 3, 4, 6), 128),
+        ("download", (1, 3, 8, 12)),
+    ]

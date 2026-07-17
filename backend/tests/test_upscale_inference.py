@@ -187,6 +187,28 @@ def test_create_optimized_upscaler_falls_back_from_full_frame_to_tiles(module, t
     assert failures == [((1088, 1920), "TensorRT out of memory")]
 
 
+def test_create_optimized_upscaler_falls_back_to_smaller_adaptive_tiles(module, tmp_path):
+    model = tmp_path / "model.safetensors"
+    model.write_bytes(b"model")
+    attempts = []
+
+    def factory(path, **kwargs):
+        attempts.append(kwargs["input_size"])
+        if kwargs["input_size"] == (544, 544):
+            raise RuntimeError("TensorRT out of memory")
+        return FakeBatchUpscaler()
+
+    _, tile_size, compile_size, failures = module.create_optimized_upscaler(
+        model, width=1088, height=1920, backend="tensorrt", requested_tile=512,
+        fallback_tile_sizes=(256, 128), factory=factory,
+    )
+
+    assert attempts == [(544, 544), (288, 288)]
+    assert tile_size == 256
+    assert compile_size == (288, 288)
+    assert failures == [((544, 544), "TensorRT out of memory")]
+
+
 def test_static_onnx_input_size_detects_fixed_nchw_shape(module, tmp_path):
     onnx = importlib.import_module("onnx")
     helper = onnx.helper

@@ -589,17 +589,19 @@ def render(args) -> None:
             detail=f"model={Path(model_path).name} input={info['width']}x{info['height']} precision={args.precision}")
         compile_started = time.monotonic()
         requested_tile = args.tilesize
+        fallback_tiles: tuple[int, ...] = ()
         if target_scale >= 4 and "2x" in Path(model_path).name.lower() and requested_tile == 0:
-            requested_tile = 128
-            log("ENGINE", "Using fixed tiles for iterative 2x-to-4x upscaling",
-                detail="a static full-frame engine cannot accept the second-pass 2x output")
+            requested_tile = 512
+            fallback_tiles = (256, 128)
+            log("ENGINE", "Using adaptive tiles for iterative 2x-to-4x upscaling",
+                detail="starting at core=512; static full-frame engines cannot accept the second-pass 2x output")
         upscaler, tile_size, compile_size, compile_failures = create_optimized_upscaler(
             model_path, width=info["width"], height=info["height"],
             backend=args.backend, requested_tile=requested_tile, device=args.device,
-            gpu_id=args.pytorch_gpu_id, precision=args.precision,
+            gpu_id=args.pytorch_gpu_id, precision=args.precision, fallback_tile_sizes=fallback_tiles,
         )
         for failed_size, reason in compile_failures:
-            log("WARN", "Full-frame TensorRT unavailable; retrying safe fixed tiles",
+            log("WARN", "TensorRT candidate unavailable; retrying smaller tiles",
                 detail=f"input={failed_size[0]}x{failed_size[1]} reason={reason}")
         mode = "full-frame" if tile_size == 0 else f"tiled core={tile_size} overlap=16"
         log("ENGINE", "AI upscaler ready",

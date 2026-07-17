@@ -7,7 +7,7 @@ import subprocess
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Any, Callable, Iterable, Protocol, cast
 
 import cv2
 import numpy as np
@@ -15,6 +15,14 @@ import numpy as np
 from upscale_inference import Upscaler, upscale_frame_tiled
 
 _SENTINEL = object()
+
+
+class TensorUpscaler(Upscaler, Protocol):
+    supports_tensor_pipeline: bool
+
+    def frame_to_tensor(self, frame: np.ndarray) -> Any: ...
+    def upscale_tensor_tiled(self, tensor: Any, tile_size: int) -> Any: ...
+    def tensor_to_frame(self, tensor: Any) -> np.ndarray: ...
 
 
 def _ffmpeg() -> str:
@@ -78,6 +86,12 @@ class FrameProcessor:
     def upscale(self, frame: np.ndarray) -> np.ndarray:
         if self.upscaler is None:
             return frame
+        if getattr(self.upscaler, "supports_tensor_pipeline", False):
+            tensor_upscaler = cast(TensorUpscaler, self.upscaler)
+            output = tensor_upscaler.frame_to_tensor(frame)
+            while output.shape[-1] < self.target_size[0] or output.shape[-2] < self.target_size[1]:
+                output = tensor_upscaler.upscale_tensor_tiled(output, self.tile_size)
+            return tensor_upscaler.tensor_to_frame(output)
         output = frame
         while output.shape[1] < self.target_size[0] or output.shape[0] < self.target_size[1]:
             output = (upscale_frame_tiled(output, self.upscaler, tile_size=self.tile_size)

@@ -108,13 +108,19 @@ def create_upscaler(model_path: str | Path, *, backend: str, device: str = "auto
 def create_optimized_upscaler(model_path: str | Path, *, width: int, height: int,
                               backend: str, requested_tile: int = 0,
                               device: str = "auto", gpu_id: int = 0,
-                              precision: str = "float16", factory=None):
+                              precision: str = "float16", fallback_tile_sizes: tuple[int, ...] = (),
+                              factory=None):
     factory = factory or create_upscaler
     fixed_size = static_onnx_input_size(model_path)
     if backend == "tensorrt":
         candidates = tensorrt_compile_candidates(
             width, height, requested_tile=requested_tile, fixed_input_size=fixed_size,
         )
+        if requested_tile > 0 and fallback_tile_sizes:
+            candidates += [
+                (tile_size, (tile_size + 32, tile_size + 32))
+                for tile_size in fallback_tile_sizes if tile_size != requested_tile
+            ]
     else:
         tile_size = fixed_size[0] - 32 if fixed_size else requested_tile
         compile_size = fixed_size or (width, height)
@@ -164,6 +170,7 @@ class SafetensorsUpscaler:
             self.model = descriptor.to(self.device, dtype=self.dtype).eval()
         self.technique = f"{descriptor.architecture.name} + PyTorch"
         self.batch_size = 1
+        self.supports_tensor_pipeline = self.device.type == "cuda"
 
         if backend == "tensorrt":
             if self.device.type != "cuda":
@@ -193,6 +200,84 @@ class SafetensorsUpscaler:
 
     def upscale(self, frame: np.ndarray) -> np.ndarray:
         return self.upscale_batch([frame])[0]
+
+    def frame_to_tensor(self, frame: np.ndarray):
+        """Upload one BGR frame through pinned host memory for iterative CUDA paths."""
+        import torch
+        rgb = np.ascontiguousarray(frame[..., ::-1].transpose(2, 0, 1)[None])
+        tensor = torch.from_numpy(rgb)
+        if self.device.type == "cuda":
+            tensor = tensor.pin_memory().to(self.device, dtype=self.dtype, non_blocking=True)
+        else:
+            tensor = tensor.to(self.device, dtype=self.dtype)
+        return tensor.div_(255.0)
+
+    def tensor_to_frame(self, tensor) -> np.ndarray:
+        """Download a normalized NCHW RGB tensor once after all iterative passes."""
+        import torch
+        output = tensor[0].detach().float().clamp_(0, 1).mul_(255.0).round_().to("cpu")
+        rgb = output.to(torch.uint8).numpy().transpose(1, 2, 0)
+        return np.ascontiguousarray(rgb[..., ::-1])
+
+    def _upscale_tensor_batch(self, tensor):
+        import torch
+        count = tensor.shape[0]
+        if count > self.batch_size:
+            raise ValueError(f"tensor batch {count} exceeds compiled TensorRT batch {self.batch_size}")
+        if count < self.batch_size:
+            tensor = torch.cat((tensor, tensor[-1:].expand(self.batch_size - count, -1, -1, -1)), dim=0)
+        if self.model is None:
+            raise RuntimeError("upscaler is closed")
+        with torch.inference_mode():
+            output = self.model(tensor)
+        if isinstance(output, (tuple, list)):
+            output = output[0]
+        return output[:count]
+
+    def upscale_tensor_tiled(self, tensor, tile_size: int, *, overlap: int = 16):
+        """Run a tiled CUDA inference pass without a CPU/NumPy round trip.
+
+        TensorRT engines are static, so tile batches are padded to the compiled
+        batch size inside _upscale_tensor_batch. The assembled result remains on
+        CUDA and can immediately feed the next native 2x pass.
+        """
+        import torch
+        import torch.nn.functional as F
+        if tensor.ndim != 4 or tensor.shape[0] != 1 or tensor.shape[1] != 3:
+            raise ValueError(f"expected one NCHW RGB tensor, got {tuple(tensor.shape)}")
+        if tile_size <= 0:
+            return self._upscale_tensor_batch(tensor)
+        _, _, height, width = tensor.shape
+        scale = self.scale
+        rows = (height + tile_size - 1) // tile_size
+        cols = (width + tile_size - 1) // tile_size
+        padded_height = rows * tile_size
+        padded_width = cols * tile_size
+        # Extra context on every edge matches the CPU tiled path's reflected border.
+        padded = F.pad(
+            tensor,
+            (overlap, padded_width - width + overlap, overlap, padded_height - height + overlap),
+            mode="reflect",
+        )
+        output = torch.empty((1, 3, height * scale, width * scale), device=tensor.device, dtype=tensor.dtype)
+        pending = []
+        for top in range(0, padded_height, tile_size):
+            for left in range(0, padded_width, tile_size):
+                pending.append((
+                    padded[:, :, top:top + tile_size + 2 * overlap, left:left + tile_size + 2 * overlap],
+                    top, min(top + tile_size, height), left, min(left + tile_size, width),
+                ))
+        for start in range(0, len(pending), self.batch_size):
+            items = pending[start:start + self.batch_size]
+            tiles = torch.cat([item[0] for item in items], dim=0)
+            upscaled = self._upscale_tensor_batch(tiles)
+            for item, tile in zip(items, upscaled, strict=True):
+                _, top, bottom, left, right = item
+                output[:, :, top * scale:bottom * scale, left * scale:right * scale] = tile[
+                    :, overlap * scale:(overlap + bottom - top) * scale,
+                    overlap * scale:(overlap + right - left) * scale,
+                ]
+        return output
 
     def upscale_batch(self, frames: list[np.ndarray]) -> list[np.ndarray]:
         import torch
