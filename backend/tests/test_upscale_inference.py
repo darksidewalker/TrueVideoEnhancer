@@ -164,6 +164,29 @@ def test_full_frame_engine_gets_larger_tactic_workspace(module):
     assert module.tensorrt_workspace_size((160, 160)) == 1 << 30
 
 
+def test_tensorrt_engine_cache_uses_durable_model_adjacent_directory(module, tmp_path):
+    def compiler(*, cache_built_engines, reuse_cached_engines, engine_cache_dir, engine_cache_size, immutable_weights):
+        pass
+
+    options = module.tensorrt_engine_cache_kwargs(tmp_path / "model.safetensors", compiler=compiler)
+
+    assert options == {
+        "cache_built_engines": True,
+        "reuse_cached_engines": True,
+        "engine_cache_dir": str(tmp_path / ".tensorrt-engine-cache"),
+        "engine_cache_size": 5 << 30,
+        "immutable_weights": False,
+    }
+    assert (tmp_path / ".tensorrt-engine-cache").is_dir()
+
+
+def test_tensorrt_engine_cache_disables_cleanly_on_unsupported_compiler(module, tmp_path):
+    def compiler(*, engine_cache_dir):
+        pass
+
+    assert module.tensorrt_engine_cache_kwargs(tmp_path / "model.safetensors", compiler=compiler) == {}
+
+
 def test_create_optimized_upscaler_falls_back_from_full_frame_to_tiles(module, tmp_path):
     model = tmp_path / "model.safetensors"
     model.write_bytes(b"model")

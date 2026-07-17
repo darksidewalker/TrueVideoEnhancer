@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from inspect import signature
 from pathlib import Path
 from typing import Protocol
 import warnings
@@ -55,6 +56,28 @@ def tensorrt_batch_size(input_size: tuple[int, int]) -> int:
 
 def tensorrt_workspace_size(input_size: tuple[int, int]) -> int:
     return (8 if input_size[0] * input_size[1] > 512 * 512 else 1) << 30
+
+
+def tensorrt_engine_cache_kwargs(model_path: str | Path, *, compiler=None) -> dict[str, object]:
+    """Enable Torch-TensorRT's durable Dynamo engine cache when this runtime supports it."""
+    try:
+        if compiler is None:
+            from torch_tensorrt.dynamo._compiler import compile as compiler
+        required = {"cache_built_engines", "reuse_cached_engines", "engine_cache_dir", "engine_cache_size", "immutable_weights"}
+        if not required.issubset(signature(compiler).parameters):
+            return {}
+        cache_dir = Path(model_path).parent / ".tensorrt-engine-cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return {
+            "cache_built_engines": True,
+            "reuse_cached_engines": True,
+            "engine_cache_dir": str(cache_dir),
+            "engine_cache_size": 5 << 30,
+            # Dynamo's cache intentionally skips engines with immutable weights.
+            "immutable_weights": False,
+        }
+    except Exception:
+        return {}
 
 
 def static_onnx_input_size(model_path: str | Path) -> tuple[int, int] | None:
@@ -159,6 +182,7 @@ class SafetensorsUpscaler:
         if not isinstance(descriptor, ImageModelDescriptor):
             raise RuntimeError(f"model is not an image upscaler: {model_path.name}")
         self.scale = int(descriptor.scale)
+        self.model_path = model_path
         self.device = torch.device(device)
         self.dtype = torch.float16 if precision == "float16" and self.device.type == "cuda" else torch.float32
         try:
@@ -190,12 +214,15 @@ class SafetensorsUpscaler:
         width, height = input_size
         sample = torch.zeros((self.batch_size, 3, height, width), device=self.device, dtype=self.dtype)
         compile_target = getattr(self.model, "model", self.model)
+        model_path = getattr(self, "model_path", None)
+        cache_kwargs = tensorrt_engine_cache_kwargs(model_path) if model_path is not None else {}
         return torch_tensorrt.compile(
             compile_target,
             ir="dynamo",
             inputs=[sample],
             workspace_size=tensorrt_workspace_size(input_size),
             min_block_size=1,
+            **cache_kwargs,
         )
 
     def upscale(self, frame: np.ndarray) -> np.ndarray:
