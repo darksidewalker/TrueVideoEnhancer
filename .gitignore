@@ -14,6 +14,9 @@ build/
 # Venv
 runtime/venv/
 
+# Hermes session plans and local agent state
+.hermes/
+
 # IDE
 .idea/
 .vscode/
