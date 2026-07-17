@@ -24,6 +24,7 @@
 - [API Endpoints](#api-endpoints)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
+- [Credits](#credits)
 - [Contributing](#contributing)
 
 ---
@@ -369,6 +370,13 @@ You can manually override either selection in Advanced Settings. Selected models
 2. Missing models show a download arrow (↓)
 3. Click **Download** next to any missing model
 4. Progress streams in the Download dialog — do not close during download
+
+---
+
+## Credits
+
+- **AnimeJaNai HD V3 Compact 2x** — the bundled `2x-AnimeJaNai_HD_V3_Compact.safetensors` model is credited to the [AnimeJaNai project](https://github.com/the-database/AnimeJaNai). It remains subject to its upstream license and terms.
+- **[Real-Video-Enhancer](https://github.com/TNTwise/Real-Video-Enhancer)** by TNTwise — a valuable reference project for video-enhancement workflows and model integration. DaSiWa True Video Enhancer is an independent implementation and is not affiliated with or endorsed by Real-Video-Enhancer.
 
 ---
 
