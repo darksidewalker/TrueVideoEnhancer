@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import queue
 import shutil
 import subprocess
@@ -15,6 +16,48 @@ import numpy as np
 from upscale_inference import Upscaler, upscale_frame_tiled
 
 _SENTINEL = object()
+MAX_SAFE_OUTPUT_PIXELS = 33_177_600  # 8K UHD; preserves 1080p→8K 4x jobs.
+_HOST_MEMORY_HEADROOM = 512 << 20
+
+
+def available_host_memory() -> int | None:
+    """Return currently available host RAM without counting reclaim-unsafe swap."""
+    try:
+        return os.sysconf("SC_AVPHYS_PAGES") * os.sysconf("SC_PAGE_SIZE")
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def validate_resource_budget(*, source_width: int, source_height: int,
+                             output_width: int, output_height: int,
+                             available_memory: int | None = None) -> int:
+    """Fail before spawning ML/FFmpeg workers for a frame the host cannot safely hold.
+
+    Rawvideo streaming deliberately keeps only bounded queues, but each 4x frame is
+    still held by the processor and encoder at the same time.  A hard output-pixel
+    limit avoids pathological allocations that can bypass Python's normal OOM path
+    and stall the desktop before the kernel can reclaim memory.
+    """
+    output_pixels = output_width * output_height
+    if output_pixels > MAX_SAFE_OUTPUT_PIXELS:
+        raise RuntimeError(
+            f"requested {output_width}x{output_height} output exceeds the 8K safety limit "
+            f"({MAX_SAFE_OUTPUT_PIXELS:,} pixels); use a smaller scale or source resolution"
+        )
+    source_bytes = source_width * source_height * 3
+    output_bytes = output_pixels * 3
+    # Reader queue (3), writer queue (3), plus the current processed output and
+    # a conversion buffer.  This intentionally excludes GPU tensors.
+    required_memory = _HOST_MEMORY_HEADROOM + source_bytes * 3 + output_bytes * 5
+    if available_memory is None:
+        available_memory = available_host_memory()
+    if available_memory is not None and available_memory < required_memory:
+        raise RuntimeError(
+            f"insufficient host memory for bounded streaming buffers: need at least "
+            f"{required_memory / (1 << 30):.1f} GiB free, have "
+            f"{available_memory / (1 << 30):.1f} GiB"
+        )
+    return required_memory
 
 
 class TensorUpscaler(Upscaler, Protocol):

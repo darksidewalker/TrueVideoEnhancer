@@ -45,6 +45,38 @@ def test_raw_frame_roundtrip_uses_exact_frame_size():
     assert np.array_equal(restored, frame)
 
 
+def test_resource_guard_rejects_output_larger_than_safe_8k_frame_budget():
+    with pytest.raises(RuntimeError, match="safety limit"):
+        module().validate_resource_budget(
+            source_width=3840,
+            source_height=2160,
+            output_width=15360,
+            output_height=8640,
+            available_memory=64 << 30,
+        )
+
+
+def test_resource_guard_allows_1080p_to_8k_when_host_memory_is_available():
+    module().validate_resource_budget(
+        source_width=1920,
+        source_height=1080,
+        output_width=7680,
+        output_height=4320,
+        available_memory=8 << 30,
+    )
+
+
+def test_resource_guard_rejects_insufficient_host_memory_for_streaming_buffers():
+    with pytest.raises(RuntimeError, match="host memory"):
+        module().validate_resource_budget(
+            source_width=1920,
+            source_height=1080,
+            output_width=7680,
+            output_height=4320,
+            available_memory=128 << 20,
+        )
+
+
 def test_fused_processor_runs_interpolation_then_upscale():
     calls = []
 

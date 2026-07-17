@@ -67,6 +67,7 @@ else:
 from upscale_inference import create_optimized_upscaler
 from streaming_pipeline import (
     FrameProcessor, RawVideoReader, RawVideoWriter, encode_command, stream_frames,
+    validate_resource_budget,
 )
 
 VERSION = "0.2.0"
@@ -572,8 +573,12 @@ def render(args) -> None:
     output_width, output_height = derive_output_resolution(
         info["width"], info["height"], args.scale, args.override_upscale_scale,
     )
+    required_host_memory = validate_resource_budget(
+        source_width=info["width"], source_height=info["height"],
+        output_width=output_width, output_height=output_height,
+    )
     log("RES", f"source={info['width']}x{info['height']} target={output_width}x{output_height}",
-        detail=f"scale={target_scale} upscale_model={args.upscale_model or 'none'}")
+        detail=f"scale={target_scale} upscale_model={args.upscale_model or 'none'} host_buffer_budget={required_host_memory / (1 << 30):.1f}GiB")
     if args.interpolate_model and factor <= 1.0:
         log("WARN", "interpolation model selected but no FPS increase requested; skipping RIFE")
     if factor > 1.0 and not args.interpolate_model:
@@ -591,10 +596,10 @@ def render(args) -> None:
         requested_tile = args.tilesize
         fallback_tiles: tuple[int, ...] = ()
         if target_scale >= 4 and "2x" in Path(model_path).name.lower() and requested_tile == 0:
-            requested_tile = 512
-            fallback_tiles = (256, 128)
+            requested_tile = 256
+            fallback_tiles = (128,)
             log("ENGINE", "Using adaptive tiles for iterative 2x-to-4x upscaling",
-                detail="starting at core=512; static full-frame engines cannot accept the second-pass 2x output")
+                detail="starting at core=256 to preserve desktop memory headroom; static full-frame engines cannot accept the second-pass 2x output")
         upscaler, tile_size, compile_size, compile_failures = create_optimized_upscaler(
             model_path, width=info["width"], height=info["height"],
             backend=args.backend, requested_tile=requested_tile, device=args.device,
