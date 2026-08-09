@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +28,14 @@ type Manager struct {
 	mu          sync.Mutex
 	jobs        map[string]*Job
 	subscribers map[string]map[chan Event]struct{}
+	queue       chan queuedJob
+	runJob      func(context.Context, string, []string)
+}
+
+type queuedJob struct {
+	ctx  context.Context
+	id   string
+	args []string
 }
 
 const maxStoredLogLines = 800
@@ -39,19 +49,41 @@ type Event struct {
 }
 
 type Job struct {
-	ID          string    `json:"id"`
-	Input       string    `json:"input"`
-	Output      string    `json:"output"`
-	Status      string    `json:"status"`
-	StartedAt   time.Time `json:"started_at"`
-	EndedAt     time.Time `json:"ended_at,omitempty"`
-	Args        []string  `json:"args"`
-	Logs        []string  `json:"logs"`
-	Error       string    `json:"error,omitempty"`
-	LivePreview []byte    `json:"-"` // Base64-decoded JPEG frame (in-memory only)
-	VideoCodec  string    `json:"video_codec,omitempty"` // Resolved video codec from backend
-	cancel      context.CancelFunc
+	ID                 string    `json:"id"`
+	Input              string    `json:"input"`
+	Output             string    `json:"output"`
+	Status             string    `json:"status"`
+	StartedAt          time.Time `json:"started_at"`
+	EndedAt            time.Time `json:"ended_at,omitempty"`
+	Args               []string  `json:"args"`
+	Logs               []string  `json:"logs"`
+	Error              string    `json:"error,omitempty"`
+	LivePreview        []byte    `json:"-"`                     // Base64-decoded JPEG frame (in-memory only)
+	VideoCodec         string    `json:"video_codec,omitempty"` // Resolved video codec from backend
+	ProgressDone       int       `json:"progress_done,omitempty"`
+	ProgressTotal      int       `json:"progress_total,omitempty"`
+	ProgressThroughput float64   `json:"progress_throughput,omitempty"`
+	cancel             context.CancelFunc
 }
+
+type JobSummary struct {
+	ID                 string    `json:"id"`
+	Input              string    `json:"input"`
+	Output             string    `json:"output"`
+	Status             string    `json:"status"`
+	StartedAt          time.Time `json:"started_at"`
+	EndedAt            time.Time `json:"ended_at,omitempty"`
+	Error              string    `json:"error,omitempty"`
+	ProgressDone       int       `json:"progress_done,omitempty"`
+	ProgressTotal      int       `json:"progress_total,omitempty"`
+	ProgressThroughput float64   `json:"progress_throughput,omitempty"`
+}
+
+var (
+	processedProgressRE = regexp.MustCompile(`(?i)\bprocessed\s+(\d+)/(\d+)\s+frames(?:\s+throughput=([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?\d+)?)\s*fps)?`)
+	wroteProgressRE     = regexp.MustCompile(`(?i)\bwrote\s+(\d+)/(\d+)\s+frames`)
+	outputFramesRE      = regexp.MustCompile(`(?i)\boutput_frames=(\d+)`)
+)
 
 type Request struct {
 	Input                 string   `json:"input"`
@@ -93,7 +125,15 @@ type Request struct {
 }
 
 func NewManager(cfg Config) *Manager {
-	return &Manager{cfg: cfg, jobs: make(map[string]*Job), subscribers: make(map[string]map[chan Event]struct{})}
+	m := &Manager{
+		cfg:         cfg,
+		jobs:        make(map[string]*Job),
+		subscribers: make(map[string]map[chan Event]struct{}),
+		queue:       make(chan queuedJob, 256),
+	}
+	m.runJob = m.run
+	go m.queueWorker()
+	return m
 }
 
 func (m *Manager) Start(req Request) (*Job, error) {
@@ -103,7 +143,22 @@ func (m *Manager) Start(req Request) (*Job, error) {
 	}
 	jobID := newID()
 	args := m.buildArgs(req)
-	job := &Job{ID: jobID, Input: req.Input, Output: req.Output, Status: "queued", StartedAt: time.Now(), Args: args}
+
+	var ctx context.Context
+	var cancel context.CancelFunc
+	if !req.DryRun {
+		ctx, cancel = context.WithCancel(context.Background())
+	}
+
+	job := &Job{
+		ID:        jobID,
+		Input:     req.Input,
+		Output:    req.Output,
+		Status:    "queued",
+		StartedAt: time.Now(),
+		Args:      args,
+		cancel:    cancel,
+	}
 
 	m.mu.Lock()
 	m.jobs[job.ID] = job
@@ -115,10 +170,37 @@ func (m *Manager) Start(req Request) (*Job, error) {
 		return job, nil
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	job.cancel = cancel
-	go m.run(ctx, job.ID, args)
+	m.appendLog(job.ID, "Queued: waiting for the current video job to finish.")
+	m.queue <- queuedJob{ctx: ctx, id: job.ID, args: args}
 	return job, nil
+}
+
+func (m *Manager) queueWorker() {
+	for item := range m.queue {
+		if item.ctx == nil || item.ctx.Err() != nil {
+			continue
+		}
+		if !m.beginRun(item.id) {
+			continue
+		}
+		m.runJob(item.ctx, item.id, item.args)
+	}
+}
+
+func (m *Manager) beginRun(id string) bool {
+	var event Event
+	m.mu.Lock()
+	job := m.jobs[id]
+	if job == nil || job.Status != "queued" {
+		m.mu.Unlock()
+		return false
+	}
+	job.Status = "running"
+	job.StartedAt = time.Now()
+	event = Event{Type: "status", Job: cloneJob(job)}
+	m.mu.Unlock()
+	m.broadcast(id, event)
+	return true
 }
 
 func (m *Manager) Get(id string) (*Job, bool) {
@@ -129,6 +211,20 @@ func (m *Manager) Get(id string) (*Job, bool) {
 		return nil, false
 	}
 	return cloneJob(job), true
+}
+
+func (m *Manager) List() []*JobSummary {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	jobs := make([]*JobSummary, 0, len(m.jobs))
+	for _, job := range m.jobs {
+		jobs = append(jobs, summarizeJob(job))
+	}
+	sort.Slice(jobs, func(i, j int) bool {
+		return jobs[i].ID < jobs[j].ID
+	})
+	return jobs
 }
 
 func (m *Manager) Subscribe(id string) (<-chan Event, func(), bool) {
@@ -163,19 +259,25 @@ func (m *Manager) Subscribe(id string) (<-chan Event, func(), bool) {
 func (m *Manager) Cancel(id string) error {
 	m.mu.Lock()
 	job, ok := m.jobs[id]
-	m.mu.Unlock()
 	if !ok {
+		m.mu.Unlock()
 		return errors.New("job not found")
 	}
-	if job.cancel != nil {
-		job.cancel()
+	cancel := job.cancel
+	status := job.Status
+	m.mu.Unlock()
+
+	if status == "done" || status == "error" || status == "cancelled" {
+		return nil
 	}
-	m.finish(id, "cancelled", "")
+	if cancel != nil {
+		cancel()
+	}
+	m.finishIfActive(id, "cancelled", "")
 	return nil
 }
 
 func (m *Manager) run(ctx context.Context, id string, args []string) {
-	m.setStatus(id, "running")
 
 	// Use venv python if available
 	pythonPath := m.cfg.Python
@@ -189,19 +291,19 @@ func (m *Manager) run(ctx context.Context, id string, args []string) {
 	cmd := exec.CommandContext(ctx, pythonPath, args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		m.finish(id, "error", err.Error())
+		m.finishRunError(ctx, id, err)
 		return
 	}
 
 	// Separate stderr pipe for preview data parsing
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		m.finish(id, "error", err.Error())
+		m.finishRunError(ctx, id, err)
 		return
 	}
 
 	if err := cmd.Start(); err != nil {
-		m.finish(id, "error", err.Error())
+		m.finishRunError(ctx, id, err)
 		return
 	}
 
@@ -246,10 +348,22 @@ func (m *Manager) run(ctx context.Context, id string, args []string) {
 
 	wg.Wait()
 	if err := cmd.Wait(); err != nil {
-		m.finish(id, "error", err.Error())
+		m.finishRunError(ctx, id, err)
 		return
 	}
-	m.finish(id, "done", "")
+	if ctx.Err() != nil {
+		m.finishIfActive(id, "cancelled", "")
+		return
+	}
+	m.finishIfActive(id, "done", "")
+}
+
+func (m *Manager) finishRunError(ctx context.Context, id string, err error) {
+	if ctx.Err() != nil {
+		m.finishIfActive(id, "cancelled", "")
+		return
+	}
+	m.finishIfActive(id, "error", err.Error())
 }
 
 func (m *Manager) buildArgs(req Request) []string {
@@ -435,6 +549,7 @@ func (m *Manager) appendLog(id, line string) {
 	m.mu.Lock()
 	if job := m.jobs[id]; job != nil {
 		job.Logs = append(job.Logs, line)
+		updateProgressFromLog(job, line)
 		if len(job.Logs) > maxStoredLogLines {
 			job.Logs = append([]string(nil), job.Logs[len(job.Logs)-maxStoredLogLines:]...)
 		}
@@ -448,6 +563,23 @@ func (m *Manager) finish(id, status, message string) {
 	var event Event
 	m.mu.Lock()
 	if job := m.jobs[id]; job != nil {
+		job.Status = status
+		job.EndedAt = time.Now()
+		job.Error = message
+		event = Event{Type: status, Job: cloneJob(job)}
+	}
+	m.mu.Unlock()
+	m.broadcast(id, event)
+}
+
+func (m *Manager) finishIfActive(id, status, message string) {
+	var event Event
+	m.mu.Lock()
+	if job := m.jobs[id]; job != nil {
+		if job.Status == "done" || job.Status == "error" || job.Status == "cancelled" {
+			m.mu.Unlock()
+			return
+		}
 		job.Status = status
 		job.EndedAt = time.Now()
 		job.Error = message
@@ -489,6 +621,54 @@ func (m *Manager) setVideoCodec(id string, codec string) {
 		job.VideoCodec = codec
 	}
 	m.mu.Unlock()
+}
+
+func updateProgressFromLog(job *Job, line string) {
+	if match := processedProgressRE.FindStringSubmatch(line); match != nil {
+		if done, err := strconv.Atoi(match[1]); err == nil {
+			job.ProgressDone = done
+		}
+		if total, err := strconv.Atoi(match[2]); err == nil {
+			job.ProgressTotal = total
+		}
+		if len(match) > 3 && match[3] != "" {
+			if throughput, err := strconv.ParseFloat(match[3], 64); err == nil {
+				job.ProgressThroughput = throughput
+			}
+		}
+		return
+	}
+
+	if match := wroteProgressRE.FindStringSubmatch(line); match != nil {
+		if done, err := strconv.Atoi(match[1]); err == nil {
+			job.ProgressDone = done
+		}
+		if total, err := strconv.Atoi(match[2]); err == nil {
+			job.ProgressTotal = total
+		}
+		return
+	}
+
+	if match := outputFramesRE.FindStringSubmatch(line); match != nil {
+		if total, err := strconv.Atoi(match[1]); err == nil {
+			job.ProgressTotal = total
+		}
+	}
+}
+
+func summarizeJob(job *Job) *JobSummary {
+	return &JobSummary{
+		ID:                 job.ID,
+		Input:              job.Input,
+		Output:             job.Output,
+		Status:             job.Status,
+		StartedAt:          job.StartedAt,
+		EndedAt:            job.EndedAt,
+		Error:              job.Error,
+		ProgressDone:       job.ProgressDone,
+		ProgressTotal:      job.ProgressTotal,
+		ProgressThroughput: job.ProgressThroughput,
+	}
 }
 
 func cloneJob(job *Job) *Job {
