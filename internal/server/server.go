@@ -46,6 +46,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/search-files", s.searchFiles)
 	mux.HandleFunc("GET /api/stream", s.streamVideo)
 	mux.HandleFunc("POST /api/open-folder", s.openFolder)
+	mux.HandleFunc("GET /api/jobs", s.listJobs)
 	mux.HandleFunc("POST /api/jobs", s.startJob)
 	mux.HandleFunc("GET /api/jobs/{id}", s.getJob)
 	mux.HandleFunc("GET /api/jobs/{id}/events", s.jobEvents)
@@ -416,6 +417,10 @@ func cleanPath(value, fallback string) string {
 		value = real
 	}
 	return value
+}
+
+func (s *Server) listJobs(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"jobs": s.cfg.Jobs.List()})
 }
 
 func (s *Server) startJob(w http.ResponseWriter, r *http.Request) {
