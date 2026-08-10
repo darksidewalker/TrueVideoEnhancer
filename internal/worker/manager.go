@@ -41,6 +41,7 @@ type queuedJob struct {
 const maxStoredLogLines = 800
 const _PREVIEW_MARKER = "<PREVIEW>"
 const _VIDEO_CODEC_MARKER = "<VIDEO_CODEC>"
+const _OUTPUT_PATH_MARKER = "<OUTPUT_PATH>"
 
 type Event struct {
 	Type string `json:"type"`
@@ -339,6 +340,9 @@ func (m *Manager) run(ctx context.Context, id string, args []string) {
 			} else if strings.HasPrefix(line, _VIDEO_CODEC_MARKER) {
 				codec := line[len(_VIDEO_CODEC_MARKER):]
 				m.setVideoCodec(id, codec)
+			} else if strings.HasPrefix(line, _OUTPUT_PATH_MARKER) {
+				output := strings.TrimSpace(line[len(_OUTPUT_PATH_MARKER):])
+				m.setOutputPath(id, output)
 			} else if len(line) > 0 {
 				// Non-preview stderr lines are also logged
 				m.appendLog(id, line)
@@ -619,6 +623,17 @@ func (m *Manager) setVideoCodec(id string, codec string) {
 	m.mu.Lock()
 	if job := m.jobs[id]; job != nil {
 		job.VideoCodec = codec
+	}
+	m.mu.Unlock()
+}
+
+func (m *Manager) setOutputPath(id string, output string) {
+	if output == "" {
+		return
+	}
+	m.mu.Lock()
+	if job := m.jobs[id]; job != nil {
+		job.Output = output
 	}
 	m.mu.Unlock()
 }

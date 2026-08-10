@@ -625,10 +625,7 @@
       audioTag = audioPreset;
     }
 
-    const selectedVideoCodec = request.video_encoder_preset || "auto";
-    const videoCodecTag = selectedVideoCodec === "auto"
-      ? "av1_nvenc"
-      : selectedVideoCodec;
+    const videoCodecTag = request.video_encoder_preset || "auto";
 
     const tags = [
       rifeTag,

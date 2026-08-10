@@ -66,8 +66,8 @@ else:
 
 from upscale_inference import create_optimized_upscaler
 from streaming_pipeline import (
-    FrameProcessor, RawVideoReader, RawVideoWriter, encode_command, stream_frames,
-    validate_resource_budget,
+    FrameProcessor, RawVideoReader, RawVideoWriter, encode_command,
+    resolve_output_codec_path, stream_frames, validate_resource_budget,
 )
 
 VERSION = "0.2.0"
@@ -555,6 +555,7 @@ def render(args) -> None:
     log("PIPE", f"input={args.input}", detail=f"output={args.output}")
     info = probe_video(args.input)
     log("TECH", "video_probe", detail=f"source={info['width']}x{info['height']} fps={info['fps']:.6g} duration={info['duration']:.3f}s")
+    requested_video_encoder = (args.video_encoder_preset or "auto").strip() or "auto"
     args.video_encoder_preset, args.audio_encoder_preset, args.subtitle_encoder_preset = normalize_encode_settings(
         args.output,
         args.video_encoder_preset,
@@ -563,9 +564,13 @@ def render(args) -> None:
         info.get("audio_codec", ""),
         info.get("subtitle_codec", ""),
     )
-    # Emit resolved video codec immediately so the frontend can update the
-    # output filename tag from "[auto]" to the actual codec in real-time.
     resolved_codec = encoder_args(args.video_encoder_preset, args.crf, args.video_pixel_format)[1]
+    resolved_output = resolve_output_codec_path(
+        args.output, requested_video_encoder, resolved_codec,
+    )
+    if resolved_output != args.output:
+        args.output = resolved_output
+        print(f"<OUTPUT_PATH>{args.output}", file=sys.stderr, flush=True)
     print(f"<VIDEO_CODEC>{resolved_codec}", file=sys.stderr, flush=True)
     output_fps, factor = derive_target_fps(info["fps"], args.target_fps)
     

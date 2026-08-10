@@ -86,6 +86,33 @@ def _fps_string(fps: float) -> str:
     return f"{fps:.6f}".rstrip("0").rstrip(".")
 
 
+def resolve_output_codec_path(output_video: str, requested_tag: str, resolved_codec: str) -> str:
+    """Replace the final UI-generated codec tag with the codec actually used.
+
+    Arbitrary CLI output names are left untouched. Only a final ``[requested]``
+    tag immediately before the extension is replaced.
+    """
+    path = Path(output_video)
+    suffix = path.suffix
+    name = path.name
+    stem = name[:-len(suffix)] if suffix else name
+
+    requested = (requested_tag or "auto").strip() or "auto"
+    marker = f"[{requested}]"
+    if not stem.endswith(marker):
+        return output_video
+
+    codec = "".join(
+        ch if ch.isalnum() or ch in "._-" else "-"
+        for ch in (resolved_codec or "").strip()
+    ).strip("-_.")
+    if not codec:
+        return output_video
+
+    resolved_name = f"{stem[:-len(marker)]}[{codec}]{suffix}"
+    return str(path.with_name(resolved_name))
+
+
 def encode_command(input_video: str, output_video: str, *, width: int, height: int,
                    fps: float, video_args: list[str], audio_args: list[str],
                    subtitle_args: list[str]) -> list[str]:

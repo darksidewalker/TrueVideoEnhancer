@@ -192,6 +192,21 @@ func TestErrorDoesNotBlockFollowingJob(t *testing.T) {
 	}
 }
 
+func TestSetOutputPathUpdatesJob(t *testing.T) {
+	m := NewManager(Config{})
+	m.jobs["job"] = &Job{ID: "job", Output: "/tmp/video[auto].mp4"}
+
+	m.setOutputPath("job", "/tmp/video[libx265].mp4")
+
+	job, ok := m.Get("job")
+	if !ok {
+		t.Fatal("job not found")
+	}
+	if job.Output != "/tmp/video[libx265].mp4" {
+		t.Fatalf("output = %q, want resolved codec path", job.Output)
+	}
+}
+
 func TestProgressParsing(t *testing.T) {
 	job := &Job{}
 
