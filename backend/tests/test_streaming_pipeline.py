@@ -31,6 +31,24 @@ def test_encode_command_accepts_rawvideo_and_maps_source_media():
     assert command[-1] == "output.mp4"
 
 
+def test_resolve_output_codec_path_replaces_final_requested_tag():
+    resolve = module().resolve_output_codec_path
+    assert resolve(
+        "/tmp/clip[rife][2x][auto].mp4", "auto", "libx265",
+    ) == "/tmp/clip[rife][2x][libx265].mp4"
+    assert resolve(
+        "/tmp/clip[auto_scene][rife][auto].mp4", "auto", "h264_nvenc",
+    ) == "/tmp/clip[auto_scene][rife][h264_nvenc].mp4"
+
+
+def test_resolve_output_codec_path_leaves_arbitrary_output_names_untouched():
+    resolve = module().resolve_output_codec_path
+    assert resolve("/tmp/custom-output.mp4", "auto", "libx265") == "/tmp/custom-output.mp4"
+    assert resolve(
+        "/tmp/clip[av1_nvenc].mp4", "auto", "libx265",
+    ) == "/tmp/clip[av1_nvenc].mp4"
+
+
 def test_output_schedule_supports_fractional_target_fps():
     schedule = list(module().output_schedule(source_count=3, source_fps=24, target_fps=60))
     assert [(left, right) for left, right, _ in schedule[:6]] == [

@@ -608,13 +608,10 @@ function outputResolutionTag() {
 }
 
 function videoCodecTag() {
-  // If we have a resolved codec from the backend, use it
-  if (currentJob && currentJob.video_codec) {
-    return currentJob.video_codec;
-  }
-  // Otherwise fall back to user selection
-  const selected = $("videoEncoderPreset").value || "auto";
-  return selected === "auto" ? "av1_nvenc" : selected; // fallback to common default
+  // The backend resolves Auto against the codecs actually available on this
+  // machine. Use an honest placeholder here; the backend replaces it before
+  // encoding and reports the resolved output path back to the worker.
+  return $("videoEncoderPreset").value || "auto";
 }
 
 function buildOutputPath(inputPath) {
