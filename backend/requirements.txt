@@ -11,12 +11,12 @@ numpy==2.5.0
 
 cupy-cuda13x>=14.1.1
 scenedetect
-torch==2.12.0+cu132
-torchvision==0.27.0+cu132
+torch==2.13.0+cu132
+torchvision==0.28.0+cu132
 einops
 safetensors
 spandrel
-torch_tensorrt>=1.3.0
+torch_tensorrt==2.13.0
 onnx
 onnxscript
 onnxruntime-gpu
