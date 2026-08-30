@@ -1,0 +1,40 @@
+[setup] no existing cache to wipe
+[A] RVE_UPSCALER_TRT_ENGINE_CACHE=0 compile=160x160
+[08/30/2026-15:11:27] [TRT] [W] Functionality provided through tensorrt.plugin module is experimental.
+[A] build=39.0s total=39.3s out_shape=(320, 320, 3) mean=127.86 std=60.30 channel_means=[135.1 120.7 127.8]
+[A stderr]
+CUDA 13 is not currently supported for TRT-LLM plugins. Please install pytorch with CUDA 12.x support
+Unable to import quantization op. Please install modelopt library (https://github.com/NVIDIA/TensorRT-Model-Optimizer?tab=readme-ov-file#installation) to add support for compiling quantized models
+Unable to import quantize op. Please install modelopt library (https://github.com/NVIDIA/TensorRT-Model-Optimizer?tab=readme-ov-file#installation) to add support for compiling quantized models
+ERROR:torch_tensorrt [TensorRT Conversion Context]:[stdArchiveReader.cpp::stdArchiveReaderInitCommon::49] Error Code 1: Serialization (Serialization assertion stdVersionRead == kSERIALIZATION_VERSION failed.Version tag does not match. Note: Current Version: 243, Serialized Engine Version: 240 In stdArchiveReaderInitCommon at /_src/runtime/deserialization/stdArchiveReader.cpp:49)
+WARNING:torch_tensorrt [TensorRT Conversion Context]:The timing cache will not be used!
+WARNING:py.warnings:<string>:6: UserWarning: RuntimeSettings is only honored on TRT-RTX builds; constructing it on regular TensorRT has no effect.
+
+[A] finished in 40.3s (wall, incl. imports)
+[B] RVE_UPSCALER_TRT_ENGINE_CACHE=1 compile=160x160
+[08/30/2026-15:12:07] [TRT] [W] Functionality provided through tensorrt.plugin module is experimental.
+[B] build=45.7s total=46.1s out_shape=(320, 320, 3) mean=127.86 std=60.30 channel_means=[135.1 120.7 127.8]
+[B stderr]
+CUDA 13 is not currently supported for TRT-LLM plugins. Please install pytorch with CUDA 12.x support
+Unable to import quantization op. Please install modelopt library (https://github.com/NVIDIA/TensorRT-Model-Optimizer?tab=readme-ov-file#installation) to add support for compiling quantized models
+Unable to import quantize op. Please install modelopt library (https://github.com/NVIDIA/TensorRT-Model-Optimizer?tab=readme-ov-file#installation) to add support for compiling quantized models
+WARNING:py.warnings:<string>:6: UserWarning: RuntimeSettings is only honored on TRT-RTX builds; constructing it on regular TensorRT has no effect.
+
+[B] finished in 47.1s (wall, incl. imports)
+[C] RVE_UPSCALER_TRT_ENGINE_CACHE=1 compile=160x160
+[08/30/2026-15:12:54] [TRT] [W] Functionality provided through tensorrt.plugin module is experimental.
+[C] build=16.3s total=16.6s out_shape=(320, 320, 3) mean=127.86 std=60.30 channel_means=[135.1 120.7 127.8]
+[C stderr]
+CUDA 13 is not currently supported for TRT-LLM plugins. Please install pytorch with CUDA 12.x support
+Unable to import quantization op. Please install modelopt library (https://github.com/NVIDIA/TensorRT-Model-Optimizer?tab=readme-ov-file#installation) to add support for compiling quantized models
+Unable to import quantize op. Please install modelopt library (https://github.com/NVIDIA/TensorRT-Model-Optimizer?tab=readme-ov-file#installation) to add support for compiling quantized models
+WARNING:py.warnings:<string>:6: UserWarning: RuntimeSettings is only honored on TRT-RTX builds; constructing it on regular TensorRT has no effect.
+
+[C] finished in 17.7s (wall, incl. imports)
+
+=== verdict ===
+cache entries: 1
+mean|A-C| = 0.01 (0.0-2.0 = clean refit; larger = stale-weight corruption)
+refit warnings: none
+
+RESULT: OK — fresh vs refit outputs agree, no refit warnings, no solid frames
