@@ -1,0 +1,33 @@
+[setup] no existing cache to wipe
+[A] RVE_UPSCALER_TRT_ENGINE_CACHE=0 compile=160x160
+[08/30/2026-14:40:12] [TRT] [W] Functionality provided through tensorrt.plugin module is experimental.
+[A] build=36.4s total=36.8s out_shape=(320, 320, 3) mean=127.86 std=60.30 channel_means=[135.1 120.7 127.8]
+[A stderr]
+Unable to import quantization op. Please install modelopt library (https://github.com/NVIDIA/TensorRT-Model-Optimizer?tab=readme-ov-file#installation) to add support for compiling quantized models
+Unable to import quantize op. Please install modelopt library (https://github.com/NVIDIA/TensorRT-Model-Optimizer?tab=readme-ov-file#installation) to add support for compiling quantized models
+[A] finished in 37.8s (wall, incl. imports)
+[B] RVE_UPSCALER_TRT_ENGINE_CACHE=1 compile=160x160
+[08/30/2026-14:40:50] [TRT] [W] Functionality provided through tensorrt.plugin module is experimental.
+[B] build=46.2s total=46.3s out_shape=(320, 320, 3) mean=127.86 std=60.30 channel_means=[135.1 120.7 127.8]
+[B stderr]
+Unable to import quantization op. Please install modelopt library (https://github.com/NVIDIA/TensorRT-Model-Optimizer?tab=readme-ov-file#installation) to add support for compiling quantized models
+Unable to import quantize op. Please install modelopt library (https://github.com/NVIDIA/TensorRT-Model-Optimizer?tab=readme-ov-file#installation) to add support for compiling quantized models
+[B] finished in 47.4s (wall, incl. imports)
+[C] RVE_UPSCALER_TRT_ENGINE_CACHE=1 compile=160x160
+[08/30/2026-14:41:38] [TRT] [W] Functionality provided through tensorrt.plugin module is experimental.
+[C] build=13.6s total=13.9s out_shape=(320, 320, 3) mean=86.64 std=120.78 channel_means=[  2.2   7.5 250.3]
+[C stderr]
+Unable to import quantization op. Please install modelopt library (https://github.com/NVIDIA/TensorRT-Model-Optimizer?tab=readme-ov-file#installation) to add support for compiling quantized models
+Unable to import quantize op. Please install modelopt library (https://github.com/NVIDIA/TensorRT-Model-Optimizer?tab=readme-ov-file#installation) to add support for compiling quantized models
+WARNING:torch_tensorrt.dynamo._refit:/mul_rhs CONSTANT is not found in weight mapping.
+WARNING:torch_tensorrt.dynamo._refit:/div_rhs CONSTANT is not found in weight mapping.
+[C] finished in 14.8s (wall, incl. imports)
+
+=== verdict ===
+cache entries: 1
+mean|A-C| = 129.28 (0.0-2.0 = clean refit; larger = stale-weight corruption)
+refit warnings in phase C (2):
+  - WARNING:torch_tensorrt.dynamo._refit:/mul_rhs CONSTANT is not found in weight mapping.
+  - WARNING:torch_tensorrt.dynamo._refit:/div_rhs CONSTANT is not found in weight mapping.
+
+RESULT: ISSUES FOUND — matches the issue #2 failure mode (review above)
