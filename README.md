@@ -14,6 +14,7 @@
 [![GPU](https://img.shields.io/badge/GPU-NVIDIA%20CUDA-76b900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-toolkit)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/release/python-3120/)
 [![Go](https://img.shields.io/badge/Go-1.24-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![License](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
 </div>
 
@@ -41,6 +42,7 @@ It is designed for one video job at a time: select a local source, choose a targ
 - [Changelog](#changelog)
 - [Credits](#credits)
 - [Development checks](#development-checks)
+- [License](#license)
 
 ## What it does
 
@@ -216,3 +218,10 @@ go build ./cmd/dasiwa-true-video-enhancer
 ```
 
 The backend source changed between jobs is picked up by the next spawned Python worker. Rebuild the Go binary when Go code or embedded web assets change.
+
+## License
+
+DaSiWa True Video Enhancer is free software licensed under the
+[GNU General Public License v3.0](LICENSE). The bundled
+`2x-AnimeJaNai_HD_V3_Compact.safetensors` model and any model you download
+remain under their own upstream licenses — see [Credits](#credits).
