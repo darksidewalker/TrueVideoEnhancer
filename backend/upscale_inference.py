@@ -60,27 +60,26 @@ def tensorrt_workspace_size(input_size: tuple[int, int]) -> int:
 
 
 def _upscaler_trt_engine_cache_enabled() -> bool:
-    """Opt-in gate for the persistent Dynamo upscaler engine cache.
+    """Gate for the persistent Dynamo upscaler engine cache.
 
-    Off by default: the refit path of the persistent cache silently leaves
-    stale constant-folded weights for some upscaler architectures (e.g. RCAN),
-    which corrupts frames on the second job (GitHub issue #2). Set
-    RVE_UPSCALER_TRT_ENGINE_CACHE to a truthy value to opt in.
+    On by default: torch_tensorrt >= 2.13.0 rebuilds the TensorRT->PyTorch
+    weight mapping on every refit, so the stale constant-folded weight bug
+    from issue #2 is fixed upstream. Set RVE_UPSCALER_TRT_ENGINE_CACHE to a
+    falsy value (0/false/no/off) to fall back to a fresh compile per job.
     """
-    return os.environ.get("RVE_UPSCALER_TRT_ENGINE_CACHE", "").strip().lower() in {
-        "1", "true", "yes", "on",
+    return os.environ.get("RVE_UPSCALER_TRT_ENGINE_CACHE", "1").strip().lower() not in {
+        "0", "false", "no", "off",
     }
 
 
 def tensorrt_engine_cache_kwargs(model_path: str | Path, *, compiler=None) -> dict[str, object]:
-    """Return durable Dynamo engine-cache options, or {} when not opted in / not supported.
+    """Return durable Dynamo engine-cache options, or {} when disabled / not supported.
 
-    Off by default (see _upscaler_trt_engine_cache_enabled): cached/refitted
-    Torch-TensorRT engines produced corrupted frames in reproducible
-    multi-job testing with RCAN safetensors upscaling, accompanied by
-    missing CONSTANT weight-mapping warnings (GitHub issue #2). Without
-    RVE_UPSCALER_TRT_ENGINE_CACHE the upscaler engine is compiled fresh for
-    each backend job. RIFE and ONNX TensorRT caches are unaffected.
+    On by default (see _upscaler_trt_engine_cache_enabled): torch_tensorrt
+    >= 2.13.0 refits cached engines safely. Set RVE_UPSCALER_TRT_ENGINE_CACHE
+    to 0/false/no/off to compile a fresh engine for each backend job instead
+    of reusing the persistent cache. RIFE and ONNX TensorRT caches are
+    unaffected.
     """
     if not _upscaler_trt_engine_cache_enabled():
         return {}
