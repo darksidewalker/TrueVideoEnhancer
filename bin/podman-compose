@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# podman-compose -> docker compose shim. See ./podman.
+set -euo pipefail
+[ -n "${SHIM_DRY_RUN:-}" ] && { echo "docker compose $*"; exit 0; }
+exec docker compose "$@"

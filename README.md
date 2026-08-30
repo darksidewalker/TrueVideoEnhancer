@@ -84,6 +84,36 @@ for the in-app steps, and [Configuration](#configuration) for the
 environment variables that control port, browser launch, and the TensorRT
 upscaler cache.
 
+## Run in a container
+
+The container is the supported route for Docker, Podman, and Windows through
+Docker Desktop's Linux/WSL2 GPU backend. Native Windows is not supported by
+the pinned CUDA 13.2 PyTorch/TensorRT packages.
+
+Prerequisites: an NVIDIA driver with GPU container support, then either Docker
+with NVIDIA Container Toolkit or Podman with NVIDIA CDI configured. Verify the
+host first with `nvidia-smi`.
+
+```bash
+./scripts/run.sh
+```
+
+`run.sh` detects the available engine, builds `dasiwa/tve:latest` when needed,
+and opens the service at `http://127.0.0.1:8612`. It uses `--gpus all` for
+Docker and `--device nvidia.com/gpu=all` for Podman. Set `CONTAINER_ENGINE`
+to force one engine, `TVE_BUILD=1` to rebuild, `TVE_PORT=8620` to change the
+host port, or `TVE_GPU=0` for a CPU-only diagnostic start.
+
+The launcher creates persistent host directories next to the repository:
+`models/` for downloaded model weights and the upscaler TensorRT cache,
+`cache/` for RIFE TensorRT engines and preview scratch files, and `data/` for
+media paths used inside the container. In the UI, browse or enter paths below
+`/app/data` (for example `/app/data/input.mp4`).
+
+For a CPU-only compose start, use `docker compose up` or `podman compose up`.
+The compose file intentionally contains no GPU syntax; GPU flags differ by
+engine and are applied by `run.sh`.
+
 ## Using the app
 
 The app works one video at a time. On first use:

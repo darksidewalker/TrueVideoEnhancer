@@ -58,3 +58,7 @@ take_screenshot.py
 models/*.safetensors
 models/*.onnx
 models/.trt-cache/
+models/.tensorrt-engine-cache/
+
+# Local repository index/cache
+.projectatlas/

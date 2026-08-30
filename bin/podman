@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# podman -> docker shim, for running this stack on Docker instead of Podman.
+#
+# The scripts append this dir to PATH, so it is used only when podman isn't
+# installed — a real podman earlier on PATH still wins. Nothing to configure.
+#
+# Only three calls aren't 1:1; everything else passes straight through.
+# Self-check: ./bin/test-shim.sh
+set -euo pipefail
+
+run() { [ -n "${SHIM_DRY_RUN:-}" ] && { echo "docker $*"; exit 0; }; exec docker "$@"; }
+
+# `podman image exists X` has no docker equivalent; inspect exits non-zero the
+# same way, which is all the callers check.
+if [ "${1:-}" = image ] && [ "${2:-}" = exists ]; then
+  shift 2
+  [ -n "${SHIM_DRY_RUN:-}" ] && { echo "docker image inspect $*"; exit 0; }
+  exec docker image inspect "$@" >/dev/null 2>&1
+fi
+
+args=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    # docker has no --replace; the run scripts already `rm -f` first.
+    --replace) shift ;;
+    # CDI isn't on by default across docker versions — use the native flag.
+    --device) if [ "${2:-}" = "nvidia.com/gpu=all" ]; then args+=(--gpus all); shift 2
+              else args+=("$1"); shift; fi ;;
+    --device=nvidia.com/gpu=all) args+=(--gpus all); shift ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+
+# SHIM_DRY_RUN=1 prints the translated command instead of running it — that is
+# how test-shim.sh checks the rewrite above without needing a docker daemon.
+run "${args[@]}"

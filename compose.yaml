@@ -1,0 +1,41 @@
+name: tve
+
+# DaSiWa TrueVideoEnhancer — portable, GPU-free compose (works under BOTH
+# `docker compose` and `podman compose`).
+#
+# GPU passthrough is intentionally NOT in this file: Docker and Podman use
+# incompatible GPU syntax, and Podman's CDI (`--device nvidia.com/gpu=all`)
+# only exists on rootless setups with /etc/cdi/. Use scripts/run.sh instead —
+# it detects the engine and adds the matching flag:
+#   docker → --gpus all
+#   podman → --device nvidia.com/gpu=all
+#
+# For a CPU-only run without run.sh:  docker compose up / podman compose up
+
+services:
+  tve:
+    image: dasiwa/tve:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "${TVE_PORT:-8612}:8612"
+    ipc: host        # torch DataLoader; never combine with shm-size (Podman rejects it)
+    init: true
+    environment:
+      DASIWA_NO_BROWSER: "1"
+      # RIFE TRT engine cache + preview scratch land in $TMPDIR, persisted to
+      # the host ./cache mount below.
+      TMPDIR: /tmp/rve
+    volumes:
+      # Upscaler/RIFE weights + the TensorRT upscaler engine cache
+      # (models/.tensorrt-engine-cache). Host dir is the source of truth.
+      - ./models:/app/models
+      # Media in/out: the web UI takes absolute paths; type /app/data/...
+      - ./data:/app/data
+      # RIFE TRT engines (rve_trt_engines) + preview clips survive restarts
+      - ./cache:/tmp/rve
+      # Optional: expose the host nvidia-smi so the UI GPU tiles work
+      # (nvidia-smi is a host tool, not part of the GPU device/CDI spec):
+      # - /usr/bin/nvidia-smi:/usr/local/bin/nvidia-smi:ro
+    restart: unless-stopped
