@@ -1,5 +1,13 @@
 # DaSiWa True Video Enhancer
 
+<div align="center">
+
+[![Star](https://img.shields.io/badge/%E2%9C%86%EF%B8%8F-STAR-16655e?style=social)](https://github.com/darksidewalker/TrueVideoEnhancer/stargazers)
+[![Watch](https://img.shields.io/badge/%F0%9F%91%81-WATCH-16655e?style=social)](https://github.com/darksidewalker/TrueVideoEnhancer/watchers)
+[![Fork](https://img.shields.io/badge/%F0%9F%8D%B4-FORK-16655e?style=social)](https://github.com/darksidewalker/TrueVideoEnhancer/fork)
+
+</div>
+
 A local, NVIDIA-first video upscaling and frame-interpolation application. The Go server provides a browser UI; a uv-managed Python runtime runs the AI and FFmpeg pipeline.
 
 It is designed for one video job at a time: select a local source, choose a target scale/FPS, and write a new encoded file. Nothing is uploaded.
