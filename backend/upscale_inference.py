@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from inspect import signature
 from pathlib import Path
 from typing import Protocol
+import os
 import warnings
 
 import cv2
@@ -57,15 +59,50 @@ def tensorrt_workspace_size(input_size: tuple[int, int]) -> int:
     return (8 if input_size[0] * input_size[1] > 512 * 512 else 1) << 30
 
 
-def tensorrt_engine_cache_kwargs(model_path: str | Path, *, compiler=None) -> dict[str, object]:
-    """Disable persistent Dynamo engine reuse for safetensors upscalers.
+def _upscaler_trt_engine_cache_enabled() -> bool:
+    """Opt-in gate for the persistent Dynamo upscaler engine cache.
 
-    Cached/refitted Torch-TensorRT engines produced corrupted frames in
-    reproducible multi-job testing with RCAN safetensors upscaling, accompanied
-    by missing CONSTANT weight-mapping warnings. Compile the upscaler engine
-    fresh for each backend job. RIFE and ONNX TensorRT caches are unaffected.
+    Off by default: the refit path of the persistent cache silently leaves
+    stale constant-folded weights for some upscaler architectures (e.g. RCAN),
+    which corrupts frames on the second job (GitHub issue #2). Set
+    RVE_UPSCALER_TRT_ENGINE_CACHE to a truthy value to opt in.
     """
-    return {}
+    return os.environ.get("RVE_UPSCALER_TRT_ENGINE_CACHE", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def tensorrt_engine_cache_kwargs(model_path: str | Path, *, compiler=None) -> dict[str, object]:
+    """Return durable Dynamo engine-cache options, or {} when not opted in / not supported.
+
+    Off by default (see _upscaler_trt_engine_cache_enabled): cached/refitted
+    Torch-TensorRT engines produced corrupted frames in reproducible
+    multi-job testing with RCAN safetensors upscaling, accompanied by
+    missing CONSTANT weight-mapping warnings (GitHub issue #2). Without
+    RVE_UPSCALER_TRT_ENGINE_CACHE the upscaler engine is compiled fresh for
+    each backend job. RIFE and ONNX TensorRT caches are unaffected.
+    """
+    if not _upscaler_trt_engine_cache_enabled():
+        return {}
+    try:
+        if compiler is None:
+            from torch_tensorrt.dynamo._compiler import compile as compiler
+        required = {"cache_built_engines", "reuse_cached_engines", "engine_cache_dir", "engine_cache_size", "immutable_weights"}
+        if not required.issubset(signature(compiler).parameters):
+            return {}
+        cache_dir = Path(model_path).parent / ".tensorrt-engine-cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        return {
+            "cache_built_engines": True,
+            "reuse_cached_engines": True,
+            "engine_cache_dir": str(cache_dir),
+            "engine_cache_size": 5 << 30,
+            # Dynamo's cache intentionally skips engines with immutable weights.
+            "immutable_weights": False,
+        }
+    except Exception:
+        return {}
+
 
 def static_onnx_input_size(model_path: str | Path) -> tuple[int, int] | None:
     """Return a model's fixed NCHW input size without creating an ORT session."""

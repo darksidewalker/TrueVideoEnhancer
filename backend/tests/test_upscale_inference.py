@@ -164,11 +164,12 @@ def test_full_frame_engine_gets_larger_tactic_workspace(module):
     assert module.tensorrt_workspace_size((160, 160)) == 1 << 30
 
 
-def test_tensorrt_engine_cache_is_disabled_for_safetensors_upscalers(module, tmp_path):
+def test_tensorrt_engine_cache_is_disabled_for_safetensors_upscalers(module, tmp_path, monkeypatch):
     def compiler(*, cache_built_engines, reuse_cached_engines, engine_cache_dir,
                  engine_cache_size, immutable_weights):
         pass
 
+    monkeypatch.delenv("RVE_UPSCALER_TRT_ENGINE_CACHE", raising=False)
     options = module.tensorrt_engine_cache_kwargs(
         tmp_path / "model.safetensors",
         compiler=compiler,
@@ -176,6 +177,23 @@ def test_tensorrt_engine_cache_is_disabled_for_safetensors_upscalers(module, tmp
 
     assert options == {}
     assert not (tmp_path / ".tensorrt-engine-cache").exists()
+
+
+def test_tensorrt_engine_cache_uses_durable_model_adjacent_directory(module, tmp_path, monkeypatch):
+    def compiler(*, cache_built_engines, reuse_cached_engines, engine_cache_dir, engine_cache_size, immutable_weights):
+        pass
+
+    monkeypatch.setenv("RVE_UPSCALER_TRT_ENGINE_CACHE", "1")
+    options = module.tensorrt_engine_cache_kwargs(tmp_path / "model.safetensors", compiler=compiler)
+
+    assert options == {
+        "cache_built_engines": True,
+        "reuse_cached_engines": True,
+        "engine_cache_dir": str(tmp_path / ".tensorrt-engine-cache"),
+        "engine_cache_size": 5 << 30,
+        "immutable_weights": False,
+    }
+    assert (tmp_path / ".tensorrt-engine-cache").is_dir()
 
 
 def test_tensorrt_engine_cache_stays_disabled_for_unsupported_compiler(module, tmp_path):
@@ -297,3 +315,31 @@ def test_process_frames_uses_fast_lossless_temp_png_writes(module, tmp_path, mon
     module.process_frames([source], tmp_path / "output", FakeUpscaler(), target_scale=2)
 
     assert options == [[cv2.IMWRITE_PNG_COMPRESSION, 0]]
+
+
+def test_tensorrt_engine_cache_disabled_by_default(module, tmp_path, monkeypatch):
+    def compiler(*, cache_built_engines, reuse_cached_engines, engine_cache_dir, engine_cache_size, immutable_weights):
+        pass
+
+    monkeypatch.delenv("RVE_UPSCALER_TRT_ENGINE_CACHE", raising=False)
+    options = module.tensorrt_engine_cache_kwargs(tmp_path / "model.safetensors", compiler=compiler)
+
+    assert options == {}
+    assert not (tmp_path / ".tensorrt-engine-cache").exists()
+
+
+def test_tensorrt_engine_cache_requires_explicit_opt_in(module, tmp_path, monkeypatch):
+    def compiler(*, cache_built_engines, reuse_cached_engines, engine_cache_dir, engine_cache_size, immutable_weights):
+        pass
+
+    monkeypatch.setenv("RVE_UPSCALER_TRT_ENGINE_CACHE", "1")
+    options = module.tensorrt_engine_cache_kwargs(tmp_path / "model.safetensors", compiler=compiler)
+
+    assert options == {
+        "cache_built_engines": True,
+        "reuse_cached_engines": True,
+        "engine_cache_dir": str(tmp_path / ".tensorrt-engine-cache"),
+        "engine_cache_size": 5 << 30,
+        "immutable_weights": False,
+    }
+    assert (tmp_path / ".tensorrt-engine-cache").is_dir()
