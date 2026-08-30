@@ -18,8 +18,8 @@ Usage (from the repo root):
 
 Options:
     --model PATH      safetensors upscaler (default: models/2x-AnimeSharpV4_RCAN.safetensors)
-    --compile-size N  TRT compile edge (default 160 -> 160x160, batch 8, ~1-2 GiB VRAM)
-    --frame N         synthetic input frame edge (default 96, must be <= compile size)
+    --compile-size N  TRT compile edge (default 160 -> 160x160, batch 8, ~1-2 GiB VRAM);
+                      the synthetic input frame is exactly this size (static-shape engine)
     --keep-cache      do NOT wipe models/.tensorrt-engine-cache before Phase B
     --workdir DIR     where phase outputs (phase_X.npy) go (default: system temp)
 
@@ -67,9 +67,12 @@ def look_solid(out: np.ndarray) -> bool:
     return std < 5.0 and r > 200 and r > 2.0 * g and r > 2.0 * b
 
 
-def run_single_phase(phase: str, model: Path, compile_size: int, frame_edge: int,
-                     workdir: Path) -> int:
-    """Build the upscaler (env toggle set per phase), upscale one frame, save output."""
+def run_single_phase(phase: str, model: Path, compile_size: int, workdir: Path) -> int:
+    """Build the upscaler (env toggle set per phase), upscale one frame, save output.
+
+    The frame is exactly the (static) compile size: a direct upscaler built with
+    input_size=(N,N) produces a static-shape TRT engine, so its input must be N x N.
+    """
     module = importlib.import_module("upscale_inference")
     enabled = phase in ("B", "C")
     os.environ["RVE_UPSCALER_TRT_ENGINE_CACHE"] = "1" if enabled else "0"
@@ -83,7 +86,7 @@ def run_single_phase(phase: str, model: Path, compile_size: int, frame_edge: int
     )
     build_elapsed = time.monotonic() - start
 
-    out = np.ascontiguousarray(upscaler.upscale_batch([make_frame(frame_edge)])[0])
+    out = np.ascontiguousarray(upscaler.upscale_batch([make_frame(compile_size)])[0])
     upscaler.close()
     total_elapsed = time.monotonic() - start
 
@@ -101,9 +104,8 @@ def main() -> int:
     parser.add_argument("--model", default="models/2x-AnimeSharpV4_RCAN.safetensors",
                        help="safetensors upscaler (default: the model from issue #2)")
     parser.add_argument("--compile-size", type=int, default=160,
-                       help="TRT compile edge in px (160 -> 160x160, batch 8, ~1-2 GiB VRAM)")
-    parser.add_argument("--frame", type=int, default=96,
-                       help="synthetic input frame edge (must be <= compile size)")
+                       help="TRT compile edge in px (160 -> 160x160, batch 8, ~1-2 GiB VRAM); "
+                            "the synthetic input frame is exactly this size (static-shape engine)")
     parser.add_argument("--keep-cache", action="store_true",
                         help="do not wipe models/.tensorrt-engine-cache before Phase B")
     parser.add_argument("--workdir", default="", help="where phase_X.npy files go")
@@ -117,15 +119,12 @@ def main() -> int:
             print(f"FATAL: model not found: {model}", file=sys.stderr)
             return 2
         workdir = Path(args.workdir) if args.workdir else Path(tempfile.gettempdir()) / "tve_verify"
-        return run_single_phase(args.phase, model, args.compile_size, args.frame, workdir)
+        return run_single_phase(args.phase, model, args.compile_size, workdir)
 
     # ---- orchestration: one subprocess per phase ----
     model = (ROOT / args.model).resolve()
     if not model.is_file():
         print(f"FATAL: model not found: {model}", file=sys.stderr)
-        return 2
-    if args.frame > args.compile_size:
-        print("FATAL: --frame must be <= --compile-size", file=sys.stderr)
         return 2
 
     workdir = Path(args.workdir) if args.workdir else Path(tempfile.gettempdir()) / "tve_verify"
@@ -144,7 +143,7 @@ def main() -> int:
         result = subprocess.run(
             [sys.executable, str(Path(__file__).resolve()), "--phase", phase,
              "--model", args.model, "--compile-size", str(args.compile_size),
-             "--frame", str(args.frame), "--workdir", str(workdir)],
+             "--workdir", str(workdir)],
             capture_output=True, text=True,
         )
         print(result.stdout, end="")
