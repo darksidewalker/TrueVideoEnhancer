@@ -8,6 +8,19 @@
 
 </div>
 
+<div align="center">
+
+[![OS](https://img.shields.io/badge/OS-Linux-2ea44f?logo=linux&logoColor=white)](https://en.wikipedia.org/wiki/Linux)
+[![GPU](https://img.shields.io/badge/GPU-NVIDIA%20CUDA-76b900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-toolkit)
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/release/python-3120/)
+[![Go](https://img.shields.io/badge/Go-1.24-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+
+</div>
+
+<div align="center">
+<small>AMD / Intel / Apple Silicon / CPU-only inference are not supported — see the <a href="#support-matrix">support matrix</a>.</small>
+</div>
+
 A local, NVIDIA-first video upscaling and frame-interpolation application. The Go server provides a browser UI; a uv-managed Python runtime runs the AI and FFmpeg pipeline.
 
 It is designed for one video job at a time: select a local source, choose a target scale/FPS, and write a new encoded file. Nothing is uploaded.
