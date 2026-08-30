@@ -6,6 +6,21 @@ It is designed for one video job at a time: select a local source, choose a targ
 
 ![DaSiWa True Video Enhancer Preview](assets/preview.webp)
 
+**Contents**
+
+- [What it does](#what-it-does)
+- [Requirements](#requirements)
+- [Getting started](#getting-started)
+- [Using the app](#using-the-app)
+- [Configuration](#configuration)
+- [Support matrix](#support-matrix)
+- [Model selection](#model-selection)
+- [Safe 4x operation](#safe-4x-operation)
+- [Encoding and media tracks](#encoding-and-media-tracks)
+- [Changelog](#changelog)
+- [Credits](#credits)
+- [Development checks](#development-checks)
+
 ## What it does
 
 - AI video upscaling with bundled/downloadable Safetensors and ONNX models.
@@ -29,7 +44,9 @@ The supported inference runtime is NVIDIA CUDA on Linux:
 
 The app installs Python 3.12 (falls back to 3.11) and the project-pinned CUDA 13.2 PyTorch/TensorRT dependencies through `uv`. A CUDA-capable NVIDIA system is required for the shipped runtime; the Go web server itself is portable, but AMD, Intel, Apple Silicon, and CPU-only inference are not supported configurations.
 
-## Quick start
+## Getting started
+
+Clone and build the Go binary, then start it:
 
 ```bash
 git clone https://github.com/darksidewalker/TrueVideoEnhancer.git
@@ -38,12 +55,60 @@ go build -o dasiwa-true-video-enhancer ./cmd/dasiwa-true-video-enhancer
 ./dasiwa-true-video-enhancer
 ```
 
-Open `http://127.0.0.1:8612`. Set `DASIWA_PORT` to choose a different port. Set `DASIWA_NO_BROWSER=1` to prevent automatic browser launch.
+Open `http://127.0.0.1:8612` in your browser. The first run installs the
+Python runtime and models on demand — see [Using the app](#using-the-app)
+for the in-app steps, and [Configuration](#configuration) for the
+environment variables that control port, browser launch, and the TensorRT
+upscaler cache.
 
-1. Open **Runtime** and install/check the runtime.
-2. Open **Models** and download any missing model required by your job.
-3. Choose a local input file, content type, scale, target FPS, and output path.
-4. Click **Run**. Progress and the current processed frame appear in the job panel.
+## Using the app
+
+The app works one video at a time. On first use:
+
+1. Open **Runtime** and install or check the runtime. This downloads Python
+   3.12 and the pinned CUDA 13.2 PyTorch/TensorRT packages into the
+   portable `runtime/venv/`.
+2. Open **Models** and download any model your job needs. Built-in models
+   are pre-listed; see [Model selection](#model-selection).
+3. In the main form, pick a local input file, content type, scale, target
+   FPS, and output path.
+4. Click **Run**. Progress, the current processed frame, and a live log
+   appear in the job panel. Cancel any time.
+
+The app reads local files directly — it never uploads video. After a job
+finishes, a 20-second 480px-wide MP4 proxy preview is generated for the
+browser.
+
+## Configuration
+
+All settings are environment variables read at startup; no config file.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `DASIWA_PORT` | `8612` | Port the web UI listens on. |
+| `DASIWA_NO_BROWSER` | *(unset)* | Set to `1` to stop the automatic browser launch. |
+| `RVE_UPSCALER_TRT_ENGINE_CACHE` | `1` (on) | Gate for the persistent TensorRT upscaler engine cache. |
+| `FORCE_COLOR` | *(unset)* | Set to `1` to force colored job logs even when piped. |
+
+### `RVE_UPSCALER_TRT_ENGINE_CACHE` — persistent upscaler engine cache
+
+When enabled (the default), compiled TensorRT upscaler engines are written
+to `models/.tensorrt-engine-cache/` next to the model file and reused on
+the next job, turning a ~39-second compile into a ~16-second cache hit.
+Cache entries are safe on `torch_tensorrt` 2.13.0+, which refits cached
+engines by rebuilding the weight mapping from the graph.
+
+Set it to a falsy value to fall back to a fresh engine compile per job:
+
+```bash
+RVE_UPSCALER_TRT_ENGINE_CACHE=0 ./dasiwa-true-video-enhancer
+```
+
+Accepted falsy values: `0`, `false`, `no`, `off` (case-insensitive).
+Anything else — including unset — keeps the cache on.
+
+The RIFE frame-interpolation and ONNX upscaler TensorRT caches are
+separate, always-on paths and are not affected by this variable.
 
 ## Support matrix
 
@@ -100,6 +165,21 @@ A 1080p source at 4x produces 7680×4320 and is within the limit. A 4K source at
 The default **Auto** video encoder checks the local FFmpeg build and chooses a container-compatible encoder. Audio and subtitles are copied unless you choose a transcode option. For WebM, incompatible H.264/H.265, AAC/MP3, and subtitle choices are converted before the expensive render begins.
 
 Output codec support is a property of the installed FFmpeg and hardware, not a promise that every encoder is present on every machine.
+
+## Changelog
+
+See [docs/CHANGELOG.md](docs/CHANGELOG.md) for the full release history.
+Recent notable changes:
+
+- **2026-08-30** — Fixed the TensorRT upscaler engine-cache refit
+  corruption (issue #2) by upgrading the runtime to
+  `torch_tensorrt` 2.13.0; the engine cache is now safe and ON by
+  default, with `RVE_UPSCALER_TRT_ENGINE_CACHE=0` as the off-switch.
+- **2026-08-10** — Sequential job queue with a visible queue UI.
+- **2026-07-17** — 4x host-memory guard, persistent TensorRT engine
+  cache, bundled AnimeJaNai Compact base upscaler.
+- **2026-07-12** — Bounded FFmpeg rawvideo streaming replaces serial PNG
+  frame sequences.
 
 ## Credits
 
