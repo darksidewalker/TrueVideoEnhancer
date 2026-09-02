@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -393,7 +394,16 @@ func (s *Server) openFolder(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "folder is not readable")
 		return
 	}
-	if err := exec.Command("xdg-open", path).Start(); err != nil {
+	var openCmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		openCmd = exec.Command("explorer", path)
+	case "darwin":
+		openCmd = exec.Command("open", path)
+	default:
+		openCmd = exec.Command("xdg-open", path)
+	}
+	if err := openCmd.Start(); err != nil {
 		writeError(w, http.StatusInternalServerError, "open folder failed: "+err.Error())
 		return
 	}

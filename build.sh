@@ -95,6 +95,17 @@ chmod +x ./dasiwa-true-video-enhancer ./dist/dasiwa-true-video-enhancer-linux-am
 log_info "Binary built: ./dasiwa-true-video-enhancer ($(du -h ./dasiwa-true-video-enhancer | cut -f1))"
 log_info "Release binary: ./dist/dasiwa-true-video-enhancer-linux-amd64"
 
+# ── Step 2b: Windows cross-build (pure Go, no CGo) ─────────
+log_info "Step 2b: Cross-building Windows binaries…"
+mkdir -p dist
+for arch in amd64 arm64; do
+    name="dasiwa-true-video-enhancer-windows-${arch}.exe"
+    GOOS=windows GOARCH="$arch" CGO_ENABLED=0 \
+        go build -ldflags="-s -w" -o "$name" ./cmd/dasiwa-true-video-enhancer/
+    cp -f "$name" "./dist/$name"
+    log_info "Windows binary built: ./$name ($(du -h "$name" | cut -f1))"
+done
+
 # ── Step 3: Verification ────────────────────────────────────
 echo ""
 log_info "=== Verification ==="

@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -278,12 +279,20 @@ func (m *Manager) Cancel(id string) error {
 	return nil
 }
 
+// venvPythonPath returns the platform-specific virtualenv Python executable.
+func venvPythonPath(venvDir string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(venvDir, "Scripts", "python.exe")
+	}
+	return filepath.Join(venvDir, "bin", "python")
+}
+
 func (m *Manager) run(ctx context.Context, id string, args []string) {
 
 	// Use venv python if available
 	pythonPath := m.cfg.Python
 	if m.cfg.VenvDir != "" {
-		venvPython := filepath.Join(m.cfg.VenvDir, "bin", "python")
+		venvPython := venvPythonPath(m.cfg.VenvDir)
 		if _, err := os.Stat(venvPython); err == nil {
 			pythonPath = venvPython
 		}

@@ -166,14 +166,18 @@ func (p *Probe) PythonCommand() string {
 }
 
 func (p *Probe) UvCommand() string {
-	local := filepath.Join(p.rootDir, "bin", "uv")
+	name := "uv"
+	if runtime.GOOS == "windows" {
+		name = "uv.exe"
+	}
+	local := filepath.Join(p.rootDir, "bin", name)
 	if _, err := os.Stat(local); err == nil {
 		return local
 	}
-	if uv, err := p.lookPath("uv"); err == nil {
+	if uv, err := p.lookPath(name); err == nil {
 		return uv
 	}
-	return "uv"
+	return name
 }
 
 func (p *Probe) InstallPlan(repoRoot string, modelIDs ...string) InstallPlan {
@@ -558,10 +562,20 @@ func extractTarGZ(path, dest string) error {
 }
 
 func (p *Probe) bootstrapUv(ctx context.Context, logf func(string)) error {
-	if runtime.GOOS == "windows" {
-		return errors.New("uv was not found; install uv first from https://docs.astral.sh/uv/getting-started/installation/")
-	}
 	installDir := filepath.Join(p.rootDir, "bin")
+	if runtime.GOOS == "windows" {
+		// uv's official Windows installer is a .exe (no shell required).
+		args := []string{"-NoProfile", "-ExecutionPolicy", "ByPass", "-Command",
+			"Set-Item -Path $env:TEMP -Name UV_INSTALL_DIR -Value '" + installDir + "' -Force; " +
+				"(New-Object Net.WebClient).DownloadFile('https://astral.sh/uv/install.ps1', \"$env:TEMP\\install-uv.ps1\"); " +
+				"& (Join-Path $env:TEMP 'install-uv.ps1') -y"}
+		logf("uv not found; bootstrapping uv into " + installDir)
+		out, err := p.run(ctx, "powershell", args...)
+		if text := strings.TrimSpace(string(out)); text != "" {
+			logf(text)
+		}
+		return err
+	}
 	if err := os.MkdirAll(installDir, 0755); err != nil {
 		return err
 	}
