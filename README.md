@@ -10,7 +10,7 @@
 
 <div align="center">
 
-[![OS](https://img.shields.io/badge/OS-Linux-2ea44f?logo=linux&logoColor=white)](https://en.wikipedia.org/wiki/Linux)
+[![OS](https://img.shields.io/badge/OS-Linux%20%7C%20Windows-2ea44f?logo=linux&logoColor=white)](https://en.wikipedia.org/wiki/Linux)
 [![GPU](https://img.shields.io/badge/GPU-NVIDIA%20CUDA-76b900?logo=nvidia&logoColor=white)](https://developer.nvidia.com/cuda-toolkit)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/release/python-3120/)
 [![Go](https://img.shields.io/badge/Go-1.24-00ADD8?logo=go&logoColor=white)](https://go.dev/)
@@ -58,24 +58,41 @@ For architecture, model routing, limits, and encoder behavior, see [docs/TECHNIC
 
 ## Requirements
 
-The supported inference runtime is NVIDIA CUDA on Linux:
+The supported inference runtime is NVIDIA CUDA on Linux and Windows (amd64):
 
 - NVIDIA GPU and working driver (`nvidia-smi`)
 - FFmpeg and FFprobe available on `PATH`
 - Network access on first runtime/model installation
 - Disk space for the uv Python environment, models, TensorRT cache, and output video
 
-The app installs Python 3.12 (falls back to 3.11) and the project-pinned CUDA 13.2 PyTorch/TensorRT dependencies through `uv`. A CUDA-capable NVIDIA system is required for the shipped runtime; the Go web server itself is portable, but AMD, Intel, Apple Silicon, and CPU-only inference are not supported configurations.
+The app installs Python 3.12 (falls back to 3.11) and the project-pinned CUDA 13.2 PyTorch/TensorRT dependencies through `uv`. Every pinned package ships `win_amd64` wheels, so the runtime installs on Windows exactly as on Linux (the venv lives in `runtime/venv/` with `Scripts/python.exe` on Windows). A CUDA-capable NVIDIA system is required for the shipped runtime; AMD, Intel, Apple Silicon, and CPU-only inference are not supported configurations. On Windows arm64 the web server runs, but no CUDA wheels exist for that platform, so inference is unavailable there.
 
 ## Getting started
 
-Clone and build the Go binary, then start it:
+Prebuilt binaries for all supported platforms live in the repository root:
+
+| Platform | Binary |
+|---|---|
+| Linux amd64 | `dasiwa-true-video-enhancer-linux-amd64` |
+| Windows amd64 | `dasiwa-true-video-enhancer-windows-amd64.exe` |
+| Windows arm64 (server only) | `dasiwa-true-video-enhancer-windows-arm64.exe` |
+
+Clone and start the binary for your platform:
 
 ```bash
 git clone https://github.com/darksidewalker/TrueVideoEnhancer.git
 cd TrueVideoEnhancer
-go build -o dasiwa-true-video-enhancer ./cmd/dasiwa-true-video-enhancer
-./dasiwa-true-video-enhancer
+./dasiwa-true-video-enhancer-linux-amd64
+```
+
+```powershell
+.\dasiwa-true-video-enhancer-windows-amd64.exe
+```
+
+To build from source instead, use `./build.sh` (Linux) or:
+
+```bash
+go build -o dasiwa-true-video-enhancer-linux-amd64 ./cmd/dasiwa-true-video-enhancer
 ```
 
 Open `http://127.0.0.1:8612` in your browser. The first run installs the
@@ -86,9 +103,10 @@ upscaler cache.
 
 ## Run in a container
 
-The container is the supported route for Docker, Podman, and Windows through
-Docker Desktop's Linux/WSL2 GPU backend. Native Windows is not supported by
-the pinned CUDA 13.2 PyTorch/TensorRT packages.
+The container is a supported alternative to the native binaries on Docker
+and Podman hosts, including Windows through Docker Desktop's WSL2 GPU
+backend (native Windows binaries work without a container — see
+[Getting started](#getting-started)).
 
 Prerequisites: an NVIDIA driver with GPU container support, then either Docker
 with NVIDIA Container Toolkit or Podman with NVIDIA CDI configured. Verify the
@@ -154,7 +172,7 @@ engines by rebuilding the weight mapping from the graph.
 Set it to a falsy value to fall back to a fresh engine compile per job:
 
 ```bash
-RVE_UPSCALER_TRT_ENGINE_CACHE=0 ./dasiwa-true-video-enhancer
+RVE_UPSCALER_TRT_ENGINE_CACHE=0 ./dasiwa-true-video-enhancer-linux-amd64
 ```
 
 Accepted falsy values: `0`, `false`, `no`, `off` (case-insensitive).
@@ -224,6 +242,10 @@ Output codec support is a property of the installed FFmpeg and hardware, not a p
 See [docs/CHANGELOG.md](docs/CHANGELOG.md) for the full release history.
 Recent notable changes:
 
+- **2026-09-02** — Windows support: the app runs natively on Windows
+  (amd64 inference; all pinned CUDA 13.2 wheels exist for `win_amd64`),
+  with prebuilt binaries for Linux amd64 and Windows amd64/arm64
+  committed to the repository root.
 - **2026-08-30** — Fixed the TensorRT upscaler engine-cache refit
   corruption (issue #2) by upgrading the runtime to
   `torch_tensorrt` 2.13.0; the engine cache is now safe and ON by

@@ -4,6 +4,23 @@ All notable changes to DaSiWa True Video Enhancer are recorded in this file.
 The project has no release tags; entries are grouped by date. The most recent
 entries are at the top.
 
+## 2026-09-02
+
+- **Windows support.** The Go server is fully portable (pure Go, no
+  CGo) and all pinned runtime packages — `torch`/`torchvision` cu132,
+  `torch_tensorrt`, `cupy-cuda13x`, `onnxruntime-gpu` — ship
+  `win_amd64` wheels, so the uv-managed runtime installs and runs on
+  Windows (venv Python resolved via `Scripts/python.exe`; uv bootstrap
+  uses the official installer via PowerShell; "open folder" uses
+  `explorer.exe`). Native Windows inference is supported on amd64; on
+  Windows arm64 the server runs but no CUDA wheels exist.
+- **Prebuilt binaries committed to the repository root**, one name per
+  platform: `dasiwa-true-video-enhancer-linux-amd64`,
+  `dasiwa-true-video-enhancer-windows-amd64.exe`,
+  `dasiwa-true-video-enhancer-windows-arm64.exe`. `build.sh`
+  cross-compiles all three; the Linux root copy was renamed from the
+  bare `dasiwa-true-video-enhancer` to match the pattern.
+
 ## 2026-08-30
 
 - **Fixed corrupted output from the persistent TensorRT upscaler engine cache
