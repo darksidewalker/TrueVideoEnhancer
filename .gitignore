@@ -1,5 +1,10 @@
-# Compiled binary (root-only, not under cmd/)
+# Compiled binaries (root release copies; pattern excludes platform suffixes)
 /dasiwa-true-video-enhancer
+dasiwa-true-video-enhancer-linux-*
+dasiwa-true-video-enhancer-windows-*
+!dasiwa-true-video-enhancer-linux-amd64
+!dasiwa-true-video-enhancer-windows-amd64.exe
+!dasiwa-true-video-enhancer-windows-arm64.exe
 bin/dasiwa-true-video-enhancer
 
 # Python cache

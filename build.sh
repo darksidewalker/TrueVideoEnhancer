@@ -76,7 +76,7 @@ chmod +x "$BUILD_TMP"
 for proc_exe in /proc/[0-9]*/exe; do
     [ -e "$proc_exe" ] || continue
     running_exe="$(readlink -f "$proc_exe" 2>/dev/null || true)"
-    if [ "$running_exe" = "$SCRIPT_DIR/dasiwa-true-video-enhancer" ]; then
+    if [ "$running_exe" = "$SCRIPT_DIR/dasiwa-true-video-enhancer-linux-amd64" ]; then
         pid="${proc_exe#/proc/}"
         pid="${pid%/exe}"
         log_info "Stopping running app process $pid before replacing binary…"
@@ -88,11 +88,11 @@ for proc_exe in /proc/[0-9]*/exe; do
     fi
 done
 
-mv -f "$BUILD_TMP" ./dasiwa-true-video-enhancer
-cp -f ./dasiwa-true-video-enhancer ./dist/dasiwa-true-video-enhancer-linux-amd64
-chmod +x ./dasiwa-true-video-enhancer ./dist/dasiwa-true-video-enhancer-linux-amd64
+mv -f "$BUILD_TMP" ./dasiwa-true-video-enhancer-linux-amd64
+cp -f ./dasiwa-true-video-enhancer-linux-amd64 ./dist/dasiwa-true-video-enhancer-linux-amd64
+chmod +x ./dasiwa-true-video-enhancer-linux-amd64 ./dist/dasiwa-true-video-enhancer-linux-amd64
 
-log_info "Binary built: ./dasiwa-true-video-enhancer ($(du -h ./dasiwa-true-video-enhancer | cut -f1))"
+log_info "Binary built: ./dasiwa-true-video-enhancer-linux-amd64 ($(du -h ./dasiwa-true-video-enhancer-linux-amd64 | cut -f1))"
 log_info "Release binary: ./dist/dasiwa-true-video-enhancer-linux-amd64"
 
 # ── Step 2b: Windows cross-build (pure Go, no CGo) ─────────
@@ -127,7 +127,7 @@ sys.exit(0 if ok else 1)
 log_info "Go: $(go version)"
 log_info "Running binary HTTP smoke test…"
 SMOKE_PORT=18612
-DASIWA_NO_BROWSER=1 DASIWA_PORT="$SMOKE_PORT" ./dasiwa-true-video-enhancer >./.build-smoke.log 2>&1 &
+DASIWA_NO_BROWSER=1 DASIWA_PORT="$SMOKE_PORT" ./dasiwa-true-video-enhancer-linux-amd64 >./.build-smoke.log 2>&1 &
 SMOKE_PID=$!
 trap 'kill "$SMOKE_PID" 2>/dev/null || true; rm -f ./.build-smoke.log "$BUILD_TMP"' EXIT
 smoke_ok=0
@@ -148,10 +148,10 @@ wait "$SMOKE_PID" 2>/dev/null || true
 rm -f ./.build-smoke.log
 trap - EXIT
 log_info "Binary HTTP smoke test passed."
-log_info "Binary ready: ./dasiwa-true-video-enhancer"
+log_info "Binary ready: ./dasiwa-true-video-enhancer-linux-amd64"
 
 echo ""
 echo -e "${GREEN}✓ Build successful!${NC}"
 echo ""
-echo "Usage: ./dasiwa-true-video-enhancer"
+echo "Usage: ./dasiwa-true-video-enhancer-linux-amd64"
 echo ""
