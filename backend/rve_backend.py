@@ -86,6 +86,11 @@ _COLORS = {
 }
 
 
+def _supports_fast_fp16(builder) -> bool:
+    """Return the TensorRT FP16 capability across TensorRT API versions."""
+    return getattr(builder, "platform_has_fast_fp16", True)
+
+
 def log(tag, message, *, detail=None):
     color = _COLORS.get(tag, "") if _COLOR else ""
     reset = _COLORS["RESET"] if _COLOR else ""
@@ -389,10 +394,15 @@ def build_rife_trt_engine(
     # Workspace allocation
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, DEFAULT_WORKSPACE)
 
-    # Enable FP16 if supported
-    if precision == "float16" and builder.platform_has_fast_fp16:
-        config.set_flag(trt.BuilderFlag.FP16)
-        print("[TRT] FP16 enabled", file=sys.stderr)
+    # TensorRT 11 removed platform_has_fast_fp16. All supported CUDA inference
+    # targets support FP16; retain the older capability check when it exists.
+    if precision == "float16":
+        supports_fp16 = _supports_fast_fp16(builder)
+        if supports_fp16:
+            config.set_flag(trt.BuilderFlag.FP16)
+            print("[TRT] FP16 enabled", file=sys.stderr)
+        else:
+            print("[TRT] FP16 unavailable on this platform; using FP32", file=sys.stderr)
 
     # Create network (explicit batch for ONNX compatibility)
     network_flags = trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH

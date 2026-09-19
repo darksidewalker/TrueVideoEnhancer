@@ -296,13 +296,20 @@ func (p *Probe) BackendCheck(repoRoot string) BackendCheckResult {
 		}
 
 		checkItem := CheckItem{}
-		if strings.HasPrefix(line, "[✓]") {
+		switch {
+		case strings.HasPrefix(line, "[✓]"):
 			checkItem.Pass = true
-			checkItem.Name = strings.TrimPrefix(line, "[✓] ")
-		} else if strings.HasPrefix(line, "[✗]") {
+			checkItem.Name = strings.TrimSpace(strings.TrimPrefix(line, "[✓]"))
+		case strings.HasPrefix(line, "[OK]"):
+			checkItem.Pass = true
+			checkItem.Name = strings.TrimSpace(strings.TrimPrefix(line, "[OK]"))
+		case strings.HasPrefix(line, "[✗]"):
 			checkItem.Pass = false
-			checkItem.Name = strings.TrimPrefix(line, "[✗] ")
-		} else {
+			checkItem.Name = strings.TrimSpace(strings.TrimPrefix(line, "[✗]"))
+		case strings.HasPrefix(line, "[XX]"):
+			checkItem.Pass = false
+			checkItem.Name = strings.TrimSpace(strings.TrimPrefix(line, "[XX]"))
+		default:
 			continue
 		}
 
