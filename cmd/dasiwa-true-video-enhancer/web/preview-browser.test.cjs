@@ -31,7 +31,8 @@ const server=http.createServer((req,res)=>{
   assert.equal(await page.locator('#videoPreview').isVisible(),false);
   assert.equal(await page.locator('.preview-panel #outputSummary').count(),0,'Planned output only belongs to Source');
   await page.evaluate(()=>{renderJobEvent({job:{id:'test-job',status:'running',logs:[]}});});
-  await page.locator('#processedPlayback').click();
+  assert.equal(await page.locator('#processedPlayback').getAttribute('aria-pressed'),'true','Processed preview is selected by default without a click');
+  assert.equal(await page.locator('#sourcePlayback').getAttribute('aria-pressed'),'false');
   await page.evaluate(()=>startEncodePreview('test-job'));
   await page.waitForFunction(()=>document.getElementById('placeholderFrame').textContent==='Waiting for processed frames…');
   assert.equal(await page.locator('#encodePreview').isVisible(),false,'404 live frame cannot display a broken image');

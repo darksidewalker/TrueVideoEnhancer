@@ -7,6 +7,8 @@
   // after a browser refresh while the Go server is still running.
 
   const STORAGE_KEY = "dasiwa_fifo_queue_jobs_v1";
+  const CLEARED_KEY = "dasiwa_fifo_cleared_jobs_v1";
+  const clearedJobIDs = new Set(loadClearedIDs());
   const MAX_REMEMBERED_JOBS = 100;
   const POLL_INTERVAL_MS = 1000;
   const TERMINAL = new Set(["done", "error", "cancelled"]);
@@ -20,6 +22,13 @@
   let queueSelectionPinned = false;
 
   const legacyRenderJobEvent = renderJobEvent;
+
+  function loadClearedIDs() {
+    try {
+      const ids = JSON.parse(localStorage.getItem(CLEARED_KEY) || "[]");
+      return Array.isArray(ids) ? ids.filter(id => typeof id === "string") : [];
+    } catch (_) { return []; }
+  }
 
   function loadQueueIDs() {
     try {
@@ -37,7 +46,7 @@
   }
 
   function rememberJob(job) {
-    if (!job || !job.id) return;
+    if (!job || !job.id || clearedJobIDs.has(job.id)) return;
     queueJobs.set(job.id, job);
     if (!queueJobIDs.includes(job.id)) {
       queueJobIDs.push(job.id);
@@ -141,7 +150,36 @@
 
     const logTitle = document.createElement("div");
     logTitle.className = "queue-ui-log-title";
-    logTitle.textContent = "Selected job log";
+    const label = document.createElement("span");
+    label.textContent = "Selected job log";
+    const copyStatus = document.createElement("span");
+    copyStatus.id = "copyLogStatus";
+    copyStatus.setAttribute("role", "status");
+    const copyButton = document.createElement("button");
+    copyButton.id = "copyLog";
+    copyButton.type = "button";
+    copyButton.title = "Copy log";
+    copyButton.setAttribute("aria-label", "Copy log");
+    copyButton.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="8" y="8" width="12" height="12" rx="2"/><rect x="4" y="4" width="12" height="12" rx="2"/></svg>';
+    copyButton.addEventListener("click", async () => {
+      const text = logEl.textContent;
+      try {
+        if (navigator.clipboard?.writeText) await navigator.clipboard.writeText(text);
+        else {
+          const field = document.createElement("textarea");
+          field.value = text;
+          field.style.cssText = "position:fixed;left:-9999px";
+          document.body.appendChild(field);
+          const focused = document.activeElement;
+          try {
+            field.select();
+            if (!document.execCommand("copy")) throw new Error("Clipboard unavailable");
+          } finally { field.remove(); focused?.focus(); }
+        }
+        copyStatus.textContent = "Copied";
+      } catch (_) { copyStatus.textContent = "Copy failed — select and copy the log manually."; }
+    });
+    logTitle.append(label, copyStatus, copyButton);
 
     panel.insertBefore(toolbar, logEl);
     panel.insertBefore(list, logEl);
@@ -319,6 +357,7 @@
 
     try {
       job = await api(`/api/jobs/${encodeURIComponent(id)}`);
+      if (clearedJobIDs.has(id)) return;
       rememberJob(job);
     } catch (error) {
       // A stale localStorage ID usually means the app/server was restarted.
@@ -412,8 +451,10 @@
     if (!finishedIDs.length) return;
 
     for (const id of finishedIDs) {
+      clearedJobIDs.add(id);
       queueJobs.delete(id);
     }
+    localStorage.setItem(CLEARED_KEY, JSON.stringify([...clearedJobIDs]));
     queueJobIDs = queueJobIDs.filter((id) => !finishedIDs.includes(id));
     saveQueueIDs();
 
@@ -427,7 +468,9 @@
       }
       stopEncodePreview();
       queuePreviewJobID = null;
-      log("No job selected.");
+      $("log").textContent = "No job selected.";
+      delete $("encodePreview").dataset.previewJobId;
+      updatePlayback();
     }
 
     renderQueue();
@@ -440,7 +483,8 @@
 
     try {
       const data = await api("/api/jobs");
-      const serverJobs = Array.isArray(data) ? data : (Array.isArray(data.jobs) ? data.jobs : []);
+      const serverJobs = (Array.isArray(data) ? data : (Array.isArray(data.jobs) ? data.jobs : []))
+        .filter(job => !clearedJobIDs.has(job.id));
       const byID = new Map(serverJobs.map((job) => [job.id, job]));
       serverJobs.forEach(rememberJob);
       const stale = [];
@@ -494,6 +538,7 @@
 
   // Wrap the existing renderer so SSE updates also refresh the queue row.
   renderJobEvent = function queueAwareRenderJobEvent(event) {
+    if (clearedJobIDs.has(event?.job?.id)) return;
     legacyRenderJobEvent(event);
     const job = event?.job;
     if (!job) return;

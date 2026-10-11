@@ -1,6 +1,6 @@
 const $ = id => document.getElementById(id);
 let jobEvents=null, runtimeModels=[], sourceProbe=null, sourceProbePath='', currentJob=null, livePreviewTimer=null;
-let capabilities=null, capabilityError='', probeSerial=0, playbackMode='source', runtimeModelsLoaded=false;
+let capabilities=null, capabilityError='', probeSerial=0, playbackMode='processed', runtimeModelsLoaded=false;
 const maxVisibleLogLines=500;
 const settingsKey='tve_studio_settings_v2';
 let settings={...TVE.defaults};
@@ -631,7 +631,6 @@ function buildOutputPath(input) { return TVE.outputPath({input,output_container:
 function updatePlayback() {
   const job=currentJob, done=job?.status==='done', running=job?.status==='running';
   $('processedPlayback').disabled=!(done||running);
-  if (playbackMode==='processed' && !done && !running) playbackMode='source';
   pressed('sourcePlayback',playbackMode==='source'); pressed('processedPlayback',playbackMode==='processed',!(done||running));
   const video=$('videoPreview'), img=$('encodePreview');
   let url='';

@@ -29,7 +29,7 @@ const server=http.createServer((req,res)=>{
   await page.goto(`http://127.0.0.1:${server.address().port}`);
   const row=page.locator('.queue-ui-job').filter({hasText:'video.mp4'});
   await row.getByText('ETA ≈ 45s',{exact:false}).waitFor();
-  assert.equal(await page.locator('.preview-panel').getByText(/ETA|fps|frames/i).count(),0);
+  assert.equal(await page.locator('.preview-panel').getByText(/ETA|\d+(?:\.\d+)?\s*(?:fps|frames)/i).count(),0);
   assert.equal((await row.innerText()).match(/ETA ≈/g).length,1);
   assert.doesNotMatch(await page.locator('.queue-ui-job').filter({hasText:'wait.mp4'}).innerText(),/ETA/);
   await page.evaluate(()=>window.fixtureNow+=1000);
