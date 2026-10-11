@@ -50,10 +50,12 @@ It is designed for one video job at a time: select a local source, choose a targ
 - True 2x→4x processing: a native 2x model runs twice; the second pass is not a normal resize.
 - RIFE v4.26 frame interpolation for an arbitrary higher target FPS, including fractional conversions such as 24→60.
 - Batch folder queue: enqueue every video in a folder as sequential jobs; existing outputs are skipped so a stopped batch resumes where it ended.
-- Selectable NVIDIA VFX pipeline: denoise/deblur with separate strengths, VSR/High Bitrate/Streaming Medium/Ultra upscaling, RTX Frame Generation at arbitrary higher target FPS, optional RGB10A2 SDR precision and TrueHDR with tagged 10-bit output. The legacy restore and model-upscale pipelines remain available.
+- Composable processing: AI or NVIDIA upscaling, RIFE or NVIDIA Frame Generation, optional NVIDIA denoise/deblur, and final SDR-to-HDR conversion with tagged 10-bit output.
 - Bounded FFmpeg rawvideo decode → AI → encode streaming. It does not write a full PNG frame sequence.
 - TensorRT acceleration for CUDA upscalers, with tiled fallback when a full-frame engine cannot compile.
-- Local file browsing/search, runtime install/health checks, model downloads, live JPEG progress previews, output preview generation, and job cancellation.
+- Processed preview selected by default: native-resolution live JPEGs and completed SDR browser playback at output resolution/FPS.
+- Queue progress and live ETA, job cancellation, one-click log copying, and persistent clearing of finished job entries.
+- Local file browsing/search, runtime install/health checks, and model downloads.
 - Container-aware FFmpeg encoding with optional audio/subtitle copying or transcoding.
 
 For architecture, model routing, limits, and encoder behavior, see [docs/TECHNICAL_GUIDE.md](docs/TECHNICAL_GUIDE.md). The selectable NVIDIA effects pipeline and its precision/HDR controls are described in [docs/NVIDIA_VFX.md](docs/NVIDIA_VFX.md). The compact three-area interface and short preview rendering are explained in [docs/STUDIO_WORKFLOW.md](docs/STUDIO_WORKFLOW.md).
@@ -147,11 +149,10 @@ The app works one video at a time. On first use:
 4. In the middle Settings area, choose scale/FPS and combine AI or NVIDIA upscaling, RIFE or NVIDIA interpolation, and optional NVIDIA denoise, deblur and SDR-to-HDR. Preview is on the right.
 5. Use the always-visible Settings panel to configure active features and choose an available compatible encoder. Global Fast/Balanced/Best presets and the advanced dialog have been removed.
 6. Enable **Preview** and use the seconds slider to render only the first 1–30 seconds with these settings; preview files are separate from full outputs. Disable Preview for the complete video.
-7. Click **Run preview** or **Run full video**. Source/Processed playback, progress, queue and logs remain visible. Cancel any time.
+7. Click **Run preview** or **Run full video**. **Processed** playback is selected by default; switch to **Source** manually when needed. Progress and live ETA appear in the queue. Cancel any time.
+8. Use the two-square **Copy log** button to copy the displayed log. **Clear finished** removes completed, failed and cancelled entries from this browser's job list, including after refresh; running/waiting jobs and output files are preserved.
 
-The app reads local files directly — it never uploads video. After a job
-finishes, a 20-second 480px-wide MP4 proxy preview is generated for the
-browser.
+The app reads local files directly — it never uploads video. Completed playback uses a first-20-seconds H.264 SDR browser proxy at output resolution and cadence; HDR is tone-mapped. Live JPEG frames precede final video encoding. Neither preview replaces the original output file.
 
 ## Configuration
 
@@ -200,14 +201,15 @@ separate, always-on paths and are not affected by this variable.
 | RIFE Heavy / alternate interpolation models | ❌ | Not exposed by the current built-in model list. |
 | Arbitrary higher target FPS | ✅ | Timestamp-driven scheduler supports non-integer ratios. |
 | AI denoise / restoration-only pipeline | ✅ | `restore` pipeline runs the NVIDIA RTX VFX denoise/deblur chain at source resolution (requires the nvvfx binding). |
-| NVIDIA VFX / RTX Frame Generation | ✅ | Select `NVIDIA VFX`; SDK interpolation uses timestamp-derived timesteps, independently of RIFE models. |
+| NVIDIA VFX / RTX Frame Generation | ✅ | Combine independent NVIDIA feature buttons; SDK interpolation uses timestamp-derived timesteps, independently of RIFE models. |
 | 10-bit SDR / TrueHDR | ✅ | NVIDIA pipeline supports RGB10A2 and optional SDR→BT.2020/PQ conversion with precision-preserving FFmpeg output. HDR source input is rejected; browser proxies are tone-mapped to SDR. |
 | SDK shot-change detection | ✅ | NVIDIA Frame Generation supports automatic detection or force-cut for every pair. Legacy generic scene-detection flags remain unimplemented. |
 | Batch folder queue | ✅ | Batch dialog queues every video in a folder as sequential jobs; existing outputs are skipped so a batch resumes where it stopped. |
 | Local file browse and filename search | ✅ | The app reads local paths; it does not upload videos. |
 | Job cancel and SSE progress events | ✅ | Cancels the worker context and streams job state/logs. |
-| Live processed-frame preview | ✅ | Periodic JPEG preview while a job runs. |
-| Post-job browser preview | ✅ | Generates a 20-second, 480px-wide MP4 proxy. |
+| Live processed-frame preview | ✅ | Default playback selection; native-resolution JPEG frames at quality 95 before encoding. |
+| Post-job browser preview | ✅ | First 20 seconds at output resolution/FPS, H.264 CRF 18 SDR proxy; HDR tone-mapped. |
+| Log copy and clear finished | ✅ | Two-square copy button; finished rows stay cleared in this browser after polling/reload. Active jobs and files are preserved. |
 | MP4, MKV, WebM, MOV, AVI, FLV, TS, M4V output | ✅ | FFmpeg/container compatibility still determines the actual codec. |
 | WebM codec safety conversion | ✅ | Incompatible video/audio/subtitle choices are normalized to WebM-safe formats. |
 | NVENC H.264 / HEVC / AV1 | ✅ | Used only when the installed FFmpeg and GPU support the encoder. |
@@ -245,6 +247,8 @@ Output codec support is a property of the installed FFmpeg and hardware, not a p
 
 See [docs/CHANGELOG.md](docs/CHANGELOG.md) for the full release history.
 Recent notable changes:
+
+- **2026-10-11** — Composable processing studio, bounded short renders, native-resolution processed previews selected by default, queue progress/ETA, log copy, persistent finished-job clearing, and graceful shutdown.
 
 - **2026-09-29** — Batch folder queue (folder dialog → sequential jobs,
   resume-friendly), NVIDIA RTX VFX pipeline (`nvvfx`): restore-only
