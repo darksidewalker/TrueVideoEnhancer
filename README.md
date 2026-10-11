@@ -49,12 +49,14 @@ It is designed for one video job at a time: select a local source, choose a targ
 - AI video upscaling with bundled/downloadable Safetensors and ONNX models.
 - True 2x→4x processing: a native 2x model runs twice; the second pass is not a normal resize.
 - RIFE v4.26 frame interpolation for an arbitrary higher target FPS, including fractional conversions such as 24→60.
+- Batch folder queue: enqueue every video in a folder as sequential jobs; existing outputs are skipped so a stopped batch resumes where it ended.
+- Selectable NVIDIA VFX pipeline: denoise/deblur with separate strengths, VSR/High Bitrate/Streaming Medium/Ultra upscaling, RTX Frame Generation at arbitrary higher target FPS, optional RGB10A2 SDR precision and TrueHDR with tagged 10-bit output. The legacy restore and model-upscale pipelines remain available.
 - Bounded FFmpeg rawvideo decode → AI → encode streaming. It does not write a full PNG frame sequence.
 - TensorRT acceleration for CUDA upscalers, with tiled fallback when a full-frame engine cannot compile.
 - Local file browsing/search, runtime install/health checks, model downloads, live JPEG progress previews, output preview generation, and job cancellation.
 - Container-aware FFmpeg encoding with optional audio/subtitle copying or transcoding.
 
-For architecture, model routing, limits, and encoder behavior, see [docs/TECHNICAL_GUIDE.md](docs/TECHNICAL_GUIDE.md).
+For architecture, model routing, limits, and encoder behavior, see [docs/TECHNICAL_GUIDE.md](docs/TECHNICAL_GUIDE.md). The selectable NVIDIA effects pipeline and its precision/HDR controls are described in [docs/NVIDIA_VFX.md](docs/NVIDIA_VFX.md). The compact three-area interface and short preview rendering are explained in [docs/STUDIO_WORKFLOW.md](docs/STUDIO_WORKFLOW.md).
 
 ## Requirements
 
@@ -65,7 +67,7 @@ The supported inference runtime is NVIDIA CUDA on Linux and Windows (amd64):
 - Network access on first runtime/model installation
 - Disk space for the uv Python environment, models, TensorRT cache, and output video
 
-The app installs Python 3.12 (falls back to 3.11) and the project-pinned CUDA 13.2 PyTorch/TensorRT dependencies through `uv`. Every pinned package ships `win_amd64` wheels, so the runtime installs on Windows exactly as on Linux (the venv lives in `runtime/venv/` with `Scripts/python.exe` on Windows). A CUDA-capable NVIDIA system is required for the shipped runtime; AMD, Intel, Apple Silicon, and CPU-only inference are not supported configurations. On Windows arm64 the web server runs, but no CUDA wheels exist for that platform, so inference is unavailable there.
+The app installs Python 3.12 (falls back to 3.11) and the project-pinned CUDA 13.2 PyTorch/TensorRT dependencies through `uv`. The core pinned CUDA dependencies ship `win_amd64` wheels; the NVIDIA VFX binding is distributed as source and installs its SDK runtime separately. NVIDIA VFX inference has been verified here on Linux/RTX 5090, not on Windows. The venv lives in `runtime/venv/` with `Scripts/python.exe` on Windows. A CUDA-capable NVIDIA system is required for the shipped runtime; AMD, Intel, Apple Silicon, and CPU-only inference are not supported configurations. On Windows arm64 the web server runs, but no CUDA wheels exist for that platform, so inference is unavailable there.
 
 ## Getting started
 
@@ -141,10 +143,11 @@ The app works one video at a time. On first use:
    portable `runtime/venv/`.
 2. Open **Models** and download any model your job needs. Built-in models
    are pre-listed; see [Model selection](#model-selection).
-3. In the main form, pick a local input file, content type, scale, target
-   FPS, and output path.
-4. Click **Run**. Progress, the current processed frame, and a live log
-   appear in the job panel. Cancel any time.
+3. In Source, choose the input, content (for AI) and container. The planned processing chain shows active stages and targets.
+4. In the middle Settings area, choose scale/FPS and combine AI or NVIDIA upscaling, RIFE or NVIDIA interpolation, and optional NVIDIA denoise, deblur and SDR-to-HDR. Preview is on the right.
+5. Use the always-visible Settings panel to configure active features and choose an available compatible encoder. Global Fast/Balanced/Best presets and the advanced dialog have been removed.
+6. Enable **Preview** and use the seconds slider to render only the first 1–30 seconds with these settings; preview files are separate from full outputs. Disable Preview for the complete video.
+7. Click **Run preview** or **Run full video**. Source/Processed playback, progress, queue and logs remain visible. Cancel any time.
 
 The app reads local files directly — it never uploads video. After a job
 finishes, a 20-second 480px-wide MP4 proxy preview is generated for the
@@ -196,10 +199,11 @@ separate, always-on paths and are not affected by this variable.
 | RIFE v4.26 general interpolation | ✅ | Runs only when target FPS is higher than source FPS. |
 | RIFE Heavy / alternate interpolation models | ❌ | Not exposed by the current built-in model list. |
 | Arbitrary higher target FPS | ✅ | Timestamp-driven scheduler supports non-integer ratios. |
-| AI denoise / restoration-only pipeline | ❌ | No dedicated denoise stage is implemented. |
-| HDR processing / tone mapping | ❌ | The UI flag is accepted but the backend has no HDR transform path. |
-| Scene detection | ❌ | UI options exist, but no scene-detection branch is executed by the current backend. |
-| Batch folder queue | ❌ | Jobs are submitted per input video; there is no folder/batch scheduler. |
+| AI denoise / restoration-only pipeline | ✅ | `restore` pipeline runs the NVIDIA RTX VFX denoise/deblur chain at source resolution (requires the nvvfx binding). |
+| NVIDIA VFX / RTX Frame Generation | ✅ | Select `NVIDIA VFX`; SDK interpolation uses timestamp-derived timesteps, independently of RIFE models. |
+| 10-bit SDR / TrueHDR | ✅ | NVIDIA pipeline supports RGB10A2 and optional SDR→BT.2020/PQ conversion with precision-preserving FFmpeg output. HDR source input is rejected; browser proxies are tone-mapped to SDR. |
+| SDK shot-change detection | ✅ | NVIDIA Frame Generation supports automatic detection or force-cut for every pair. Legacy generic scene-detection flags remain unimplemented. |
+| Batch folder queue | ✅ | Batch dialog queues every video in a folder as sequential jobs; existing outputs are skipped so a batch resumes where it stopped. |
 | Local file browse and filename search | ✅ | The app reads local paths; it does not upload videos. |
 | Job cancel and SSE progress events | ✅ | Cancels the worker context and streams job state/logs. |
 | Live processed-frame preview | ✅ | Periodic JPEG preview while a job runs. |
@@ -242,6 +246,12 @@ Output codec support is a property of the installed FFmpeg and hardware, not a p
 See [docs/CHANGELOG.md](docs/CHANGELOG.md) for the full release history.
 Recent notable changes:
 
+- **2026-09-29** — Batch folder queue (folder dialog → sequential jobs,
+  resume-friendly), NVIDIA RTX VFX pipeline (`nvvfx`): restore-only
+  denoise/deblur mode, RTX upscale modes incl. Streaming Medium/Ultra,
+  a `restore+upscale` combined pipeline (RTX restoration at source
+  resolution before the AI upscale), adaptive streaming queue depth,
+  and FFmpeg 7+ `-fps_mode` compatibility.
 - **2026-09-02** — Windows support: the app runs natively on Windows
   (amd64 inference; all pinned CUDA 13.2 wheels exist for `win_amd64`),
   with prebuilt binaries for Linux amd64 and Windows amd64/arm64

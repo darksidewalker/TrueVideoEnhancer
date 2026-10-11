@@ -180,3 +180,73 @@ def test_fused_processor_keeps_iterative_tensor_upscale_on_gpu_until_final_frame
         ("upscale", (1, 3, 4, 6), 128),
         ("download", (1, 3, 8, 12)),
     ]
+
+
+def test_fused_processor_runs_restore_before_upscale():
+    calls = []
+
+    class Restorer:
+        def process(self, frame_bgr, out_bgr):
+            calls.append(("restore", frame_bgr.shape))
+            np.copyto(out_bgr, frame_bgr)
+            return out_bgr
+
+    class Upscaler:
+        scale = 2
+        technique = "fake upscale"
+
+        def upscale(self, frame):
+            calls.append(("upscale", frame.shape))
+            return np.repeat(np.repeat(frame, 2, axis=0), 2, axis=1)
+
+    frame = np.zeros((2, 3, 3), np.uint8)
+    processor = module().FrameProcessor(
+        interpolator=None, upscaler=Upscaler(), tile_size=0,
+        target_size=(6, 4), to_tensor=lambda value: value, to_bgr=lambda value: value,
+        restorer=Restorer(),
+    )
+    output = processor.process(frame, frame, 0.0)
+    assert output.shape == (4, 6, 3)
+    assert calls == [("restore", (2, 3, 3)), ("upscale", (2, 3, 3))]
+
+
+def test_fused_processor_vfx_upscale_writes_into_preallocated_buffer():
+    calls = []
+
+    class VfxStage:
+        def process(self, frame_bgr, out_bgr):
+            calls.append(("vfx", frame_bgr.shape, out_bgr.shape))
+            out_bgr[:] = 7
+            return out_bgr
+
+    frame = np.zeros((2, 3, 3), np.uint8)
+    processor = module().FrameProcessor(
+        interpolator=None, upscaler=None, tile_size=0,
+        target_size=(6, 4), to_tensor=lambda value: value, to_bgr=lambda value: value,
+        vfx_upscaler=VfxStage(),
+    )
+    output = processor.process(frame, frame, 0.0)
+    assert output.shape == (4, 6, 3)
+    assert output.min() == 7
+    assert calls == [("vfx", (2, 3, 3), (4, 6, 3))]
+
+
+def test_queue_size_shrinks_for_large_frames():
+    queue_size = module().queue_size_for_frame
+    # 1080p -> 4K with plenty of RAM: full depth 3.
+    assert queue_size(1920 * 1080 * 3, 3840 * 2160 * 3,
+                      available_memory=32 * (1 << 30)) == 3
+    # Tight RAM with 4K -> 8K frames: bounded depth 2.
+    assert queue_size(3840 * 2160 * 3, 7680 * 4320 * 3,
+                      available_memory=2 * (1 << 30)) == 2
+    # Unknown memory keeps the historical default.
+    assert queue_size(1920 * 1080 * 3, 3840 * 2160 * 3,
+                      available_memory=None) == 3
+
+
+def test_decode_command_uses_ffmpeg_version_safe_vsync_flag():
+    command = module().decode_command("input.mp4", width=640, height=480)
+    joined = " ".join(command)
+    # FFmpeg >= 7 rejects -vsync; the helper must pick one consistent form.
+    assert ("-fps_mode passthrough" in joined) or ("-vsync 0" in joined)
+    assert not ("-vsync 0" in joined and "-fps_mode" in joined)

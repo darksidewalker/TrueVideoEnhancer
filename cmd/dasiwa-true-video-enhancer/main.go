@@ -62,30 +62,39 @@ func run() error {
 		VenvDir:       venvDir,
 	})
 
+	// Both OS signals and the HTTP Quit callback cancel this app instance.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	srv := server.New(server.Config{
 		Name:    appName(),
 		Version: version,
 		Web:     webFS,
 		Runtime: probe,
 		Jobs:    workerMgr,
-		Quit:    func() {},
+		Quit:    stop,
 	})
 
 	mux := srv.Routes()
 	addr := ":" + port
 	httpServer := &http.Server{Addr: addr, Handler: mux}
 
-	// Graceful shutdown
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
-
+	// Wait for owned worker cleanup as well as HTTP shutdown before exiting.
+	shutdownDone := make(chan struct{})
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		log.Println("shutting down gracefully...")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
+		workersDone := make(chan error, 1)
+		go func() { workersDone <- workerMgr.Shutdown(shutdownCtx) }()
 		if err := httpServer.Shutdown(shutdownCtx); err != nil {
 			log.Printf("shutdown error: %v", err)
+			_ = httpServer.Close()
+		}
+		if err := <-workersDone; err != nil {
+			log.Printf("worker shutdown error: %v", err)
 		}
 	}()
 
@@ -96,8 +105,11 @@ func run() error {
 	}
 
 	if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		stop()
+		<-shutdownDone
 		return fmt.Errorf("listen: %w", err)
 	}
+	<-shutdownDone
 	return nil
 }
 

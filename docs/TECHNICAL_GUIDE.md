@@ -139,31 +139,52 @@ Jobs are submitted with `POST /api/jobs`. The manager records job state, bounded
 
 The backend emits progress after the first frame and then every ten frames. The UI can show parseable frame progress and throughput. It emits a live JPEG preview every ten processed frames.
 
-After completion, `GET /api/jobs/{id}/preview` creates a browser-compatible proxy: the first 20 seconds, 12 FPS, width up to 480 pixels, no audio, H.264 MP4. This proxy is a convenience preview, not the final output.
+After completion, `GET /api/jobs/{id}/preview` creates a browser-compatible H.264 MP4 proxy of the first 20 seconds, without audio. It preserves output resolution and frame cadence and uses CRF 18 rather than a low-resolution thumbnail encode. Versioned proxy caches prevent reuse of older 480-pixel/12-FPS copies. Live JPEG frames also retain native processed resolution at quality 95, with bounded 64 MiB base64 transport. Both views remain display proxies: HDR is tone-mapped to SDR, live frames precede video encoding, and neither is a lossless representation of the final file.
 
 ## 9. Current non-features and inert compatibility fields
 
-The UI/request type exposes several settings that are not part of the current renderer's effective processing path. They should be treated as unavailable rather than advertised features.
+The legacy request/CLI contract retains several inert compatibility fields. The redesigned studio does not expose them as processing features.
 
 | Item | Current behavior |
 |---|---|
-| Denoise | No dedicated denoise model or stage exists. |
-| HDR mode | Argument is accepted, but no HDR conversion/tone-map path is implemented. |
-| Scene detection method/threshold | Arguments are accepted, but no scene-detection branch is called by the renderer. |
+| Legacy HDR mode | Legacy argument remains accepted; use the separate NVIDIA VFX TrueHDR controls for the SDK conversion and tagged output. |
+| Scene detection method/threshold | Legacy arguments are accepted, but no generic scene-detection branch is called by the renderer. NVIDIA VFX Frame Generation has its own SDK shot-change controls. |
 | Ensemble | Argument is accepted, but no ensemble inference is implemented. |
-| Dynamic optical flow | Argument is accepted, but no dynamic-flow behavior is implemented. |
+| Dynamic optical flow | Argument is accepted; the scheduler keeps a fixed interpolation ratio. |
 | Slow motion mode | Argument is accepted; higher target FPS is the actual interpolation control. |
 | Start/end trim time | Arguments are accepted, but decode is not trimmed by the current streaming command. |
 | Custom encoder field | Argument is accepted, but encoder selection uses the preset mapping. |
 | TensorRT dynamic-shape/profile flags | Arguments are accepted; the Safetensors TensorRT path compiles fixed sample/tile shapes. |
-| Multi-file batch jobs | Not implemented. Submit one source video per job. |
+
+## 9b. RTX VFX pipeline (restore / RTX upscale)
+
+`backend/rtx_vfx.py` drives the NVIDIA RTX Video SDK (`nvvfx` python binding) with the same protocol as the DaSiWa RTX Upscaler & Refiner ComfyUI node: quality levels resolved by attribute name, constructor argument probing, CUDA stream synchronization around every `run()` handoff, and direct copy of the SDK-owned output into the preallocated frame row.
+
+- `--pipeline restore` runs denoise and/or deblur at source resolution (the SDK forbids scaling in those modes), forces `scale=1`, and keeps the source FPS. It requires at least one of `--denoise`/`--deblur`.
+- `--rtx_upscale Off|VSR|High Bitrate|Streaming Medium|Streaming Ultra` replaces the AI-model upscale with the RTX VFX upscale effect. Streaming modes need the VFX SDK 1.3 binding on an Ampere-or-newer GPU.
+- `--vsr_strength 0..1` maps to the SDK 1.3 continuous strength parameter when the binding exposes it.
+- The effect chain docks at exactly one stage of the streaming `FrameProcessor` (the upscale stage when an RTX upscale mode is active, otherwise the restore stage) so denoise/deblur never run twice.
+- Without the `nvvfx` binding installed in the runtime venv, restore/RTX jobs fail fast with a clear "nvvfx is not installed" message; `--list-backends` reports binding availability.
+- Streaming stays frame-by-frame: queue depth adapts to frame size vs available RAM (`queue_size_for_frame`), and `validate_resource_budget` rejects over-commitment before the render starts.
+
+## 9c. Selectable NVIDIA VFX pipeline
+
+Use `--pipeline nvidia-vfx` or the NVIDIA VFX UI choice for SDK-only processing. See [NVIDIA_VFX.md](NVIDIA_VFX.md) for controls and limits. `backend/nvidia_vfx_pipeline.py` owns orchestration; the existing model pipeline is not replaced.
+
+- NVIDIA jobs clear both model arguments, including stale RIFE selections when RTX Frame Generation is off.
+- Frame generation uses `run_at_timestep` with the existing arbitrary-FPS scheduler; the source's final frame interval is retained.
+- Per-effect strengths, RGB10A2, TrueHDR and cut controls are explicit optional settings. Unsupported requests fail rather than silently degrading.
+- Ten-bit/HDR jobs stream `bgr48le` and verify encoded bit depth and HDR tags. Live JPEG and browser MP4 previews are SDR conversions, not the original HDR output.
+- `--vfx-capabilities` returns lazy JSON API capabilities without initializing CUDA. Inference still depends on GPU/driver support.
+- Variable/interlaced cadence, HDR inputs, trim/custom-encoder flags and scaling with SDK upscale Off are rejected explicitly.
 
 ## 10. API summary
 
 | Method | Endpoint | Purpose |
 |---|---|---|
 | GET | `/api/health` | Server health response |
-| GET | `/api/options` | UI-selectable container/codec/options metadata |
+| GET | `/api/options` | Legacy container/codec/options metadata |
+| GET | `/api/capabilities` | Installed SDK/FFmpeg capabilities and shared SDR/10-bit/HDR compatibility matrices |
 | GET | `/api/runtime/status` | Runtime/OS/tool status |
 | POST | `/api/runtime/check` | Backend dependency health check |
 | POST / GET SSE | `/api/runtime/install`, `/api/runtime/install/stream` | Install runtime |
@@ -173,6 +194,8 @@ The UI/request type exposes several settings that are not part of the current re
 | GET | `/api/probe` | FFprobe metadata for a local video |
 | GET | `/api/stream` | Serve a local source file to the browser |
 | POST | `/api/jobs` | Start one render job |
+| POST | `/api/jobs/batch` | Queue every listed input as sequential jobs (flat JSON: job settings at the top level next to `inputs`/`output_dir`; existing outputs are skipped) |
+| GET | `/api/batch-folder` | List video files in a folder (`path`, optional `recursive=1`) |
 | GET | `/api/jobs/{id}` | Fetch job state |
 | GET | `/api/jobs/{id}/events` | Job Server-Sent Events |
 | GET | `/api/jobs/{id}/live-preview` | Current JPEG preview |

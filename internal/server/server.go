@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -26,7 +27,12 @@ type Config struct {
 	Quit    func()
 }
 
-type Server struct{ cfg Config }
+type Server struct {
+	cfg               Config
+	capabilitiesState capabilityCache
+	// Private subprocess seam for capability handler tests.
+	capabilitiesRun func(context.Context, string, string, ...string) ([]byte, error)
+}
 
 func New(cfg Config) *Server { return &Server{cfg: cfg} }
 
@@ -34,6 +40,7 @@ func (s *Server) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/health", s.health)
 	mux.HandleFunc("GET /api/options", s.options)
+	mux.HandleFunc("GET /api/capabilities", s.capabilities)
 	mux.HandleFunc("GET /api/runtime/status", s.runtimeStatus)
 	mux.HandleFunc("POST /api/runtime/check", s.backendCheckHandler)
 	mux.HandleFunc("GET /api/runtime/models", s.runtimeModels)
@@ -44,11 +51,13 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/models/download", s.downloadModels)
 	mux.HandleFunc("POST /api/quit", s.quit)
 	mux.HandleFunc("GET /api/browse", s.browseFiles)
+	mux.HandleFunc("GET /api/batch-folder", s.listBatchFolder)
 	mux.HandleFunc("GET /api/search-files", s.searchFiles)
 	mux.HandleFunc("GET /api/stream", s.streamVideo)
 	mux.HandleFunc("POST /api/open-folder", s.openFolder)
 	mux.HandleFunc("GET /api/jobs", s.listJobs)
 	mux.HandleFunc("POST /api/jobs", s.startJob)
+	mux.HandleFunc("POST /api/jobs/batch", s.startBatch)
 	mux.HandleFunc("GET /api/jobs/{id}", s.getJob)
 	mux.HandleFunc("GET /api/jobs/{id}/events", s.jobEvents)
 	mux.HandleFunc("GET /api/jobs/{id}/live-preview", s.jobLivePreview)
@@ -341,6 +350,74 @@ func (s *Server) searchFiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"path": path, "query": query, "items": results})
 }
 
+// listBatchFolder returns the video files inside a folder for the batch
+// queue. recursive=1 walks subfolders; hidden directories are always skipped.
+func (s *Server) listBatchFolder(w http.ResponseWriter, r *http.Request) {
+	path := cleanPath(r.URL.Query().Get("path"), "")
+	if path == "" {
+		writeError(w, http.StatusBadRequest, "path is required")
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.IsDir() {
+		writeError(w, http.StatusBadRequest, "path is not a readable folder")
+		return
+	}
+	recursive := r.URL.Query().Get("recursive") == "1"
+	type batchItem struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+		Size int64  `json:"size"`
+	}
+	var items []batchItem
+	appendVideo := func(fp string, d fs.DirEntry) {
+		if d.IsDir() {
+			return
+		}
+		if !isVideoFile(d.Name()) {
+			return
+		}
+		fi, err := d.Info()
+		var size int64
+		if err == nil {
+			size = fi.Size()
+		}
+		items = append(items, batchItem{Name: d.Name(), Path: fp, Size: size})
+	}
+	if recursive {
+		err = filepath.WalkDir(path, func(fp string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() {
+				if strings.HasPrefix(d.Name(), ".") && fp != path {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			appendVideo(fp, d)
+			return nil
+		})
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	} else {
+		entries, err := os.ReadDir(path)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		for _, e := range entries {
+			appendVideo(filepath.Join(path, e.Name()), e)
+		}
+	}
+	sort.Slice(items, func(i, j int) bool {
+		return strings.ToLower(items[i].Name) < strings.ToLower(items[j].Name)
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"path": path, "items": items})
+}
+
 func isVideoFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	switch ext {
@@ -447,6 +524,20 @@ func (s *Server) startJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, job)
 }
 
+func (s *Server) startBatch(w http.ResponseWriter, r *http.Request) {
+	var req worker.BatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	result, err := s.cfg.Jobs.StartBatch(req)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, result)
+}
+
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
 	job, ok := s.cfg.Jobs.Get(r.PathValue("id"))
 	if !ok {
@@ -471,6 +562,18 @@ func (s *Server) jobLivePreview(w http.ResponseWriter, r *http.Request) {
 	w.Write(job.LivePreview)
 }
 
+// previewVideoFilter converts tagged HDR to SDR for the browser proxy only.
+// The original output remains untouched and retains its HDR color metadata.
+func previewVideoFilter(transfer string) string {
+	filter := "null"
+	if transfer == "smpte2084" || transfer == "arib-std-b67" {
+		filter += ",zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=mobius:desat=0,zscale=t=bt709:m=bt709:r=limited,format=yuv420p"
+	} else {
+		filter += ",format=yuv420p"
+	}
+	return filter
+}
+
 func (s *Server) jobPreview(w http.ResponseWriter, r *http.Request) {
 	job, ok := s.cfg.Jobs.Get(r.PathValue("id"))
 	if !ok {
@@ -490,18 +593,25 @@ func (s *Server) jobPreview(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "job output is not readable: "+err.Error())
 		return
 	}
-	preview := filepath.Join(os.TempDir(), "dasiwa-previews", job.ID+"-"+fmt.Sprintf("%x", info.ModTime().UnixNano())+".mp4")
+	preview := filepath.Join(os.TempDir(), "dasiwa-previews", job.ID+"-native-v2-"+fmt.Sprintf("%x", info.ModTime().UnixNano())+".mp4")
 	if _, err := os.Stat(preview); err != nil {
 		if err := os.MkdirAll(filepath.Dir(preview), 0755); err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		cmd := exec.Command("ffmpeg",
+		probe := exec.CommandContext(r.Context(), "ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=color_transfer", "-of", "default=noprint_wrappers=1:nokey=1", job.Output)
+		transfer, err := probe.Output()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "preview color probe failed: "+err.Error())
+			return
+		}
+		cmd := exec.CommandContext(r.Context(), "ffmpeg",
 			"-hide_banner", "-loglevel", "error", "-y",
 			"-i", job.Output,
 			"-t", "20",
-			"-vf", "fps=12,scale='min(480,iw)':-2",
-			"-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
+			"-vf", previewVideoFilter(strings.TrimSpace(string(transfer))),
+			"-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+			"-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
 			"-movflags", "+faststart", preview,
 		)
 		if out, err := cmd.CombinedOutput(); err != nil {

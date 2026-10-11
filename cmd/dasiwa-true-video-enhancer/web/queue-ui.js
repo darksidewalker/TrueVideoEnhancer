@@ -19,7 +19,6 @@
   let queuePreviewJobID = null;
   let queueSelectionPinned = false;
 
-  const legacyStartJob = startJob;
   const legacyRenderJobEvent = renderJobEvent;
 
   function loadQueueIDs() {
@@ -66,68 +65,8 @@
     return String(id || "").slice(0, 8);
   }
 
-  function progressFor(job) {
-    if (!job) return null;
-
-    // Prefer backend-provided progress summaries. The list endpoint returns these
-    // without shipping every job's full log on each refresh.
-    if (Number(job.progress_total) > 0) {
-      return {
-        done: Math.max(0, Number(job.progress_done) || 0),
-        total: Number(job.progress_total),
-        throughput: Math.max(0, Number(job.progress_throughput) || 0),
-      };
-    }
-
-    const logs = job.logs || [];
-
-    // Current backend format:
-    // [PIPE] processed 180/302 frames throughput=0.15 fps
-    for (let i = logs.length - 1; i >= 0; i--) {
-      const match = String(logs[i]).match(
-        /\bprocessed\s+(\d+)\/(\d+)\s+frames(?:\s+throughput=([0-9]+(?:\.[0-9]+)?(?:[eE][+-]?\d+)?)\s*fps)?/i
-      );
-      if (match) {
-        return {
-          done: Number(match[1]),
-          total: Number(match[2]),
-          throughput: Number(match[3]) || 0,
-        };
-      }
-    }
-
-    if (typeof parseFrameProgress === "function") {
-      const parsed = parseFrameProgress(logs);
-      if (parsed) return { ...parsed, throughput: 0 };
-    }
-    return null;
-  }
-
   function progressPercent(job) {
-    const parsed = progressFor(job);
-    if (!parsed || !parsed.total) return 0;
-    return Math.max(0, Math.min(100, Math.round((parsed.done / parsed.total) * 100)));
-  }
-
-  function etaFor(job) {
-    if (!job || job.status !== "running") return "";
-    const parsed = progressFor(job);
-    if (!parsed || !parsed.total || !job.started_at) return "Calculating…";
-
-    const started = Date.parse(job.started_at);
-    if (!Number.isFinite(started)) return "Calculating…";
-
-    const elapsed = Math.max(0, (Date.now() - started) / 1000);
-    const measuredThroughput = Number(parsed.throughput) || 0;
-    const rate = measuredThroughput > 0
-      ? measuredThroughput
-      : (elapsed > 0 ? parsed.done / elapsed : 0);
-    if (rate <= 0) return "Calculating…";
-
-    const remaining = Math.max(0, (parsed.total - parsed.done) / rate);
-    return typeof formatDuration === "function"
-      ? formatDuration(remaining)
-      : `${Math.ceil(remaining)}s`;
+    return TVEProgress.view(job).percent;
   }
 
   function queuePosition(id) {
@@ -140,7 +79,7 @@
     if (!job) return "UNKNOWN";
     switch (job.status) {
       case "running":
-        return `RUNNING ${progressPercent(job)}%`;
+        return TVEProgress.view(job).label;
       case "queued": {
         const pos = queuePosition(job.id);
         return pos ? `QUEUED #${pos}` : "QUEUED";
@@ -154,182 +93,6 @@
       default:
         return String(job.status || "UNKNOWN").toUpperCase();
     }
-  }
-
-  function injectQueueStyles() {
-    if (document.getElementById("dasiwaQueueStyles")) return;
-    const style = document.createElement("style");
-    style.id = "dasiwaQueueStyles";
-    style.textContent = `
-      .queue-ui-toolbar {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 10px;
-        margin: 4px 0 12px;
-        padding: 10px 12px;
-        border: 1px solid var(--line);
-        border-radius: 12px;
-        background: rgba(255,255,255,.025);
-      }
-      .queue-ui-summary {
-        color: var(--muted);
-        font-size: 13px;
-        font-weight: 600;
-      }
-      .queue-ui-actions {
-        display: flex;
-        gap: 8px;
-      }
-      .queue-ui-actions button {
-        width: auto;
-        padding: 6px 10px;
-        font-size: 12px;
-      }
-      .queue-ui-list {
-        display: grid;
-        gap: 8px;
-        margin-bottom: 14px;
-      }
-      .queue-ui-empty {
-        padding: 18px 14px;
-        border: 1px dashed var(--line);
-        border-radius: 12px;
-        color: var(--muted);
-        text-align: center;
-      }
-      .queue-ui-group-title {
-        margin: 8px 2px 4px;
-        color: var(--muted);
-        font-size: 11px;
-        font-weight: 800;
-        letter-spacing: .11em;
-        text-transform: uppercase;
-      }
-      .queue-ui-job {
-        display: grid;
-        grid-template-columns: 12px minmax(0, 1fr) auto;
-        gap: 10px;
-        align-items: center;
-        padding: 11px 12px;
-        border: 1px solid var(--line);
-        border-radius: 12px;
-        background: var(--panel-2);
-        cursor: pointer;
-        transition: border-color .12s ease, background .12s ease, transform .12s ease;
-      }
-      .queue-ui-job:hover {
-        border-color: rgba(99,243,255,.45);
-        background: color-mix(in srgb, var(--panel-2) 91%, var(--cyan) 9%);
-      }
-      .queue-ui-job.selected {
-        border-color: var(--cyan);
-        box-shadow: 0 0 0 1px rgba(99,243,255,.12);
-      }
-      .queue-ui-dot {
-        width: 9px;
-        height: 9px;
-        border-radius: 50%;
-        background: var(--muted);
-        box-shadow: 0 0 0 3px rgba(169,191,211,.08);
-      }
-      .queue-ui-job.running .queue-ui-dot {
-        background: var(--cyan);
-        box-shadow: 0 0 10px rgba(99,243,255,.65);
-        animation: queuePulse 1.2s ease-in-out infinite alternate;
-      }
-      .queue-ui-job.queued .queue-ui-dot { background: var(--amber); }
-      .queue-ui-job.done .queue-ui-dot { background: var(--green); }
-      .queue-ui-job.error .queue-ui-dot,
-      .queue-ui-job.cancelled .queue-ui-dot { background: var(--rose); }
-      .queue-ui-main { min-width: 0; }
-      .queue-ui-name {
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-        color: var(--text);
-        font-weight: 700;
-      }
-      .queue-ui-meta {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 6px 10px;
-        margin-top: 2px;
-        color: var(--muted);
-        font-size: 11px;
-        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-      }
-      .queue-ui-progress {
-        height: 5px;
-        margin-top: 8px;
-        overflow: hidden;
-        border-radius: 999px;
-        background: rgba(255,255,255,.06);
-      }
-      .queue-ui-progress > span {
-        display: block;
-        height: 100%;
-        width: 0;
-        border-radius: inherit;
-        background: linear-gradient(90deg, var(--cyan), #8c7dff);
-        transition: width .25s ease;
-      }
-      .queue-ui-side {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
-      .queue-ui-status {
-        min-width: 82px;
-        text-align: right;
-        font-size: 11px;
-        font-weight: 800;
-        letter-spacing: .04em;
-        color: var(--muted);
-      }
-      .queue-ui-job.running .queue-ui-status { color: var(--cyan); }
-      .queue-ui-job.queued .queue-ui-status { color: var(--amber); }
-      .queue-ui-job.done .queue-ui-status { color: var(--green); }
-      .queue-ui-job.error .queue-ui-status,
-      .queue-ui-job.cancelled .queue-ui-status { color: var(--rose); }
-      .queue-ui-cancel {
-        width: auto !important;
-        padding: 4px 8px !important;
-        border-color: rgba(255,95,131,.4) !important;
-        color: var(--rose) !important;
-        background: rgba(255,95,131,.07) !important;
-        font-size: 11px !important;
-      }
-      .queue-ui-log-title {
-        margin: 12px 0 6px;
-        color: var(--muted);
-        font-size: 11px;
-        font-weight: 800;
-        letter-spacing: .1em;
-        text-transform: uppercase;
-      }
-      .queue-ui-header-count {
-        margin-left: auto;
-        margin-right: 8px;
-        padding: 2px 8px;
-        border: 1px solid var(--line);
-        border-radius: 999px;
-        color: var(--muted);
-        font-size: 11px;
-        white-space: nowrap;
-      }
-      @keyframes queuePulse {
-        from { opacity: .55; transform: scale(.9); }
-        to { opacity: 1; transform: scale(1.12); }
-      }
-      @media (max-width: 720px) {
-        .queue-ui-job { grid-template-columns: 10px minmax(0, 1fr); }
-        .queue-ui-side { grid-column: 2; justify-content: space-between; }
-        .queue-ui-status { text-align: left; }
-        .queue-ui-toolbar { align-items: flex-start; flex-direction: column; }
-      }
-    `;
-    document.head.appendChild(style);
   }
 
   function injectQueuePanel() {
@@ -434,20 +197,7 @@
     idMeta.textContent = `job ${shortID(job.id)}`;
     meta.appendChild(idMeta);
 
-    if (job.status === "running") {
-      const parsed = progressFor(job);
-      if (parsed) {
-        const frames = document.createElement("span");
-        frames.textContent = `${parsed.done}/${parsed.total} frames`;
-        meta.appendChild(frames);
-      }
-      const eta = etaFor(job);
-      if (eta) {
-        const etaMeta = document.createElement("span");
-        etaMeta.textContent = `ETA ${eta}`;
-        meta.appendChild(etaMeta);
-      }
-    } else if (job.status === "queued") {
+    if (job.status === "queued") {
       const pos = queuePosition(job.id);
       if (pos) {
         const waiting = document.createElement("span");
@@ -486,6 +236,12 @@
     status.className = "queue-ui-status";
     status.textContent = statusLabel(job);
     side.appendChild(status);
+    if (job.status === "running") {
+      const detail = document.createElement("div");
+      detail.className = "queue-ui-meta";
+      detail.textContent = TVEProgress.view(job).detail;
+      side.appendChild(detail);
+    }
 
     if (job.status === "running" || job.status === "queued") {
       const cancel = document.createElement("button");
@@ -539,106 +295,6 @@
     }
 
     updateSummary();
-  }
-
-  function captureJobRequest() {
-    const input = $("input").value.trim();
-    return {
-      input,
-      output: "",
-      output_container: $("outputContainer").value,
-      backend: $("backend").value,
-      preset: document.querySelector('input[name="preset"]:checked').value,
-      content_type: $("contentType").value,
-      target_fps: Number($("targetFps").value || 0),
-      scale: Number($("scale").value || 1),
-      upscale_model: resolvedModelDestination("upscaler"),
-      rife_model: resolvedModelDestination("interpolation"),
-      crf: $("crf").value.trim(),
-      video_encoder_preset: $("videoEncoderPreset").value,
-      video_pixel_format: $("videoPixelFormat").value,
-      audio_encoder_preset: $("audioEncoderPreset").value,
-      subtitle_encoder_preset: $("subtitleEncoderPreset").value,
-      audio_bitrate: $("audioBitrate").value.trim(),
-      tile_size: Number($("tileSize").value || 0),
-      tensorrt_dynamic_shapes: $("tensorrtDynamicShapes").checked,
-      tensorrt_opt_profile: Number($("tensorrtOptProfile").value || 0),
-      scene_detect_method: $("sceneDetectMethod").value,
-      scene_detect_threshold: Number($("sceneDetectThreshold").value || 0),
-      custom_encoder: $("customEncoder").value.trim(),
-      override_upscale_scale: Number($("overrideUpscaleScale").value || 0),
-      hdr_mode: $("hdrMode").checked,
-      uhd_mode: $("uhdMode").checked,
-      slomo_mode: $("sloMoMode") ? $("sloMoMode").checked : false,
-      ensemble: $("ensemble").checked,
-      dynamic_optical_flow: $("dynamicOpticalFlow").checked,
-      benchmark: $("benchmarkMode") ? $("benchmarkMode").checked : false,
-      start_time: Number($("startTime").value || 0),
-      end_time: Number($("endTime").value || 0),
-      device: $("deviceSelect") ? $("deviceSelect").value.trim() : "",
-      pytorch_gpu_id: Number($("pytorchGpuId").value || 0),
-      ncnn_gpu_id: Number($("ncnnGpuId").value || 0),
-      dry_run: $("dryRun").checked,
-    };
-  }
-
-  async function probeForRequest(inputPath) {
-    if (!inputPath) return null;
-    try {
-      const probe = await api(`/api/probe?path=${encodeURIComponent(inputPath)}`);
-      return probe && !probe.error ? probe : null;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  function buildSnapshotOutputPath(request, probe) {
-    const input = splitPath(request.input || "");
-    if (!input.name) return "";
-
-    const sourceFps = typeof parseRate === "function" ? parseRate(probe?.r_frame_rate) : 0;
-    const needsRife = request.target_fps > 0
-      && (!sourceFps || request.target_fps > sourceFps + 1e-6);
-
-    const rifeTag = needsRife
-      ? (safeTag(request.rife_model) || "rife")
-      : "no_rife";
-    const upscaleTag = safeTag(request.upscale_model)
-      || `${request.content_type || "mixed"}_${request.scale || 1}x`;
-
-    const scale = Number(request.override_upscale_scale || request.scale || 1);
-    const width = Number(probe?.width || 0);
-    const height = Number(probe?.height || 0);
-    const resolutionTag = width > 0 && height > 0 && scale > 0
-      ? `${Math.round(width * scale)}x${Math.round(height * scale)}`
-      : `${scale || 1}x`;
-
-    const audioPreset = request.audio_encoder_preset || "copy_audio";
-    let audioTag;
-    if (["copy", "copy_audio", ""].includes(audioPreset)) {
-      audioTag = probe?.audio_codec || "audio_copy";
-    } else if (audioPreset === "opus") {
-      audioTag = "opus";
-    } else if (audioPreset === "vorbis") {
-      audioTag = "vorbis";
-    } else {
-      audioTag = audioPreset;
-    }
-
-    const videoCodecTag = request.video_encoder_preset || "auto";
-
-    const tags = [
-      rifeTag,
-      upscaleTag,
-      `${request.target_fps || "source"}fps`,
-      resolutionTag,
-      request.audio_bitrate || "copy",
-      audioTag,
-      videoCodecTag,
-    ].map(safeTag).filter(Boolean);
-
-    const container = request.output_container || "mp4";
-    return `${input.dir}${input.name}${tags.map((tag) => `[${tag}]`).join("")}.${container}`;
   }
 
   function syncSelectedPreview(job) {
@@ -702,13 +358,15 @@
     // Capture every setting immediately. Probing is asynchronous, so reading the DOM
     // after await could otherwise submit a different input/settings if the user has
     // already prepared the next queued job.
-    const request = captureJobRequest();
+    const snapshot = captureSettings();
+    const input = $("input").value.trim();
 
     try {
+      const probe = await probeForRequest(input);
+      const request = captureJobRequest(snapshot, probe, input);
       if (!request.input) throw new Error("input is required");
 
-      const probe = await probeForRequest(request.input);
-      request.output = buildSnapshotOutputPath(request, probe);
+      request.output = TVE.outputPath(request);
 
       const job = await api("/api/jobs", { method: "POST", body: JSON.stringify(request) });
 
@@ -784,6 +442,7 @@
       const data = await api("/api/jobs");
       const serverJobs = Array.isArray(data) ? data : (Array.isArray(data.jobs) ? data.jobs : []);
       const byID = new Map(serverJobs.map((job) => [job.id, job]));
+      serverJobs.forEach(rememberJob);
       const stale = [];
 
       for (const id of [...queueJobIDs]) {
@@ -849,19 +508,160 @@
     }
   };
 
-  // Replace the legacy submit handler. The original handler automatically selected
-  // every newly-submitted job and therefore disconnected the previous job's SSE.
-  // This version keeps the currently selected/running job visible while new jobs
-  // are simply added to the queue.
   const form = $("jobForm");
   if (form) {
-    form.removeEventListener("submit", legacyStartJob);
     form.addEventListener("submit", queueAwareStartJob);
   }
 
-  injectQueueStyles();
   injectQueuePanel();
   renderQueue();
+
+  // ---- Batch folder queue -------------------------------------------------
+  const batchDialog = $("batchDialog");
+  let batchItems = [];
+
+  async function loadBatchFolder() {
+    const folder = $("batchFolder").value.trim();
+    const box = $("batchFileList");
+    const summary = $("batchSummary");
+    batchItems = [];
+    if (!folder) {
+      box.innerHTML = '<p class="hint">Enter a folder path first.</p>';
+      summary.textContent = "";
+      return;
+    }
+    box.innerHTML = '<p class="hint">Scanning…</p>';
+    try {
+      const recursive = $("batchRecursive").checked ? "1" : "0";
+      const data = await api(`/api/batch-folder?path=${encodeURIComponent(folder)}&recursive=${recursive}`);
+      batchItems = data.items || [];
+      box.innerHTML = "";
+      if (!batchItems.length) {
+        box.innerHTML = '<p class="hint">No video files found in this folder.</p>';
+        summary.textContent = "";
+        return;
+      }
+      for (const item of batchItems) {
+        const row = document.createElement("label");
+        row.className = "file-browser-row";
+        row.style.display = "flex";
+        row.style.alignItems = "center";
+        row.style.gap = "8px";
+        row.style.cursor = "pointer";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.checked = true;
+        cb.dataset.path = item.path;
+        const name = document.createElement("span");
+        name.className = "file-browser-name";
+        const sizeMB = item.size ? ` (${(item.size / (1024 * 1024)).toFixed(1)} MB)` : "";
+        name.textContent = item.name + sizeMB;
+        row.appendChild(cb);
+        row.appendChild(name);
+        box.appendChild(row);
+      }
+      updateBatchSummary();
+    } catch (err) {
+      box.innerHTML = `<p class="warning">Folder scan failed: ${err.message}</p>`;
+      summary.textContent = "";
+    }
+  }
+
+  function updateBatchSummary() {
+    const checked = [...$("batchFileList").querySelectorAll("input[type=checkbox]:checked")];
+    $("batchSummary").textContent = checked.length
+      ? `${checked.length} of ${batchItems.length} videos selected`
+      : "No videos selected";
+  }
+
+  async function enqueueBatch() {
+    const folder = $("batchFolder").value.trim();
+    const checked = [...$("batchFileList").querySelectorAll("input[type=checkbox]:checked")].map((cb) => cb.dataset.path);
+    if (!checked.length) {
+      log("Batch: select at least one video first.", true);
+      return;
+    }
+    const snapshot=captureSettings();
+    const outputDir = $("batchOutputDir").value.trim() || `${folder}/enhanced`;
+    try {
+      // A flat batch request cannot carry different source-dependent model / FG
+      // choices. Probe all inputs first and prepare validated one-input batches.
+      const prepared=[];
+      for (const input of checked) {
+        const probe=await probeForRequest(input);
+        const request=captureJobRequest(snapshot,probe,input);
+        request.input=""; request.output="";
+        // Preserve recursive source directories so equal basenames cannot collide.
+        const normalized=input.replace(/\\/g,'/'), root=folder.replace(/\\/g,'/').replace(/\/$/,'');
+        const relative=normalized.startsWith(root+'/')?normalized.slice(root.length+1):normalized.split('/').pop();
+        const slash=relative.lastIndexOf('/');
+        const subdir=slash>=0?relative.slice(0,slash):'';
+        const filename=relative.slice(slash+1), stem=filename.replace(/\.[^.]+$/,'');
+        const sameStem=checked.filter(path=>{
+          const p=path.replace(/\\/g,'/');return p.slice(0,p.lastIndexOf('/'))===normalized.slice(0,normalized.lastIndexOf('/')) && p.split('/').pop().replace(/\.[^.]+$/,'')===stem;
+        }).length>1;
+        const collisionDir=sameStem?filename.replace(/[^\p{L}\p{N}._-]+/gu,'_'):'';
+        prepared.push({...request,inputs:[input],output_dir:[outputDir,subdir,collisionDir].filter(Boolean).join('/')});
+      }
+      const result={jobs:[],skipped:[]};
+      for (const payload of prepared) {
+        const response=await api("/api/jobs/batch",{method:"POST",body:JSON.stringify(payload)});
+        for (const job of response.jobs || []) { rememberJob(job); result.jobs.push(job); }
+        result.skipped.push(...(response.skipped || []));
+      }
+      for (const job of result.jobs || []) {
+        rememberJob(job);
+      }
+      renderQueue();
+      refreshQueueJobs(true);
+      const skippedNote = (result.skipped || []).length
+        ? ` Skipped ${result.skipped.length} (output exists / invalid).`
+        : "";
+      log(`Batch queued ${ (result.jobs || []).length } job(s) → ${outputDir}.${skippedNote}`);
+      batchDialog.close();
+    } catch (err) {
+      log(`Batch failed: ${err.message}`, true);
+    }
+  }
+
+  if ($("openBatchDialog")) {
+    $("openBatchDialog").addEventListener("click", () => {
+      if (!$("batchFolder").value.trim()) {
+        const input = $("input").value.trim();
+        $("batchFolder").value = input ? filepathDir(input) : (currentBrowsePath || homeDir());
+      }
+      loadBatchFolder();
+      batchDialog.showModal();
+    });
+  }
+  if ($("closeBatchX")) $("closeBatchX").addEventListener("click", () => batchDialog.close());
+  if ($("browseBatchFolder")) {
+    $("browseBatchFolder").addEventListener("click", () => {
+      openFileBrowser();
+      log("Navigate to the folder in the browser, then click 'Use current browse folder'.");
+    });
+  }
+  if ($("useCurrentBrowseFolder")) {
+    $("useCurrentBrowseFolder").addEventListener("click", () => {
+      $("batchFolder").value = currentBrowsePath || homeDir();
+      loadBatchFolder();
+    });
+  }
+  if ($("batchFolder")) $("batchFolder").addEventListener("change", loadBatchFolder);
+  if ($("batchRecursive")) $("batchRecursive").addEventListener("change", loadBatchFolder);
+  if ($("batchSelectAll")) {
+    $("batchSelectAll").addEventListener("click", () => {
+      const boxes = [...$("batchFileList").querySelectorAll("input[type=checkbox]")];
+      const allChecked = boxes.every((cb) => cb.checked);
+      for (const cb of boxes) cb.checked = !allChecked;
+      $("batchSelectAll").textContent = allChecked ? "Select all" : "Select none";
+      updateBatchSummary();
+    });
+  }
+  if ($("batchFileList")) {
+    $("batchFileList").addEventListener("change", updateBatchSummary);
+  }
+  if ($("batchEnqueue")) $("batchEnqueue").addEventListener("click", enqueueBatch);
 
   // Restore job cards after browser refresh and remove stale IDs after server restart.
   refreshQueueJobs(true);

@@ -4,6 +4,57 @@ All notable changes to DaSiWa True Video Enhancer are recorded in this file.
 The project has no release tags; entries are grouped by date. The most recent
 entries are at the top.
 
+## 2026-10-11 — Processed preview fidelity fix
+
+- Removed the completed-preview reduction to 480 pixels and 12 FPS; browser proxies retain output resolution/cadence and use H.264 CRF 18. Versioned cache paths and URLs bypass older low-quality copies.
+- Live processed JPEGs retain native frame dimensions at quality 95. Enlarged the bounded worker transport to handle those frames without truncation.
+- Clarified that playback is a first-20-seconds SDR browser proxy and that live JPEGs precede final video encoding; HDR previews remain tone-mapped rather than identical to the HDR output.
+- Verified the actual HTTP proxy with real FFmpeg encode/decode: 960×540, 60 FPS, 60 frames, SSIM above 0.98. Added native 1920×1080 JPEG and oversized subprocess-transport regressions.
+
+## 2026-10-11 — Composable processing studio
+
+- Swapped Settings and Preview; moved output scale/target FPS into Settings and added a compact planned processing chain in Source.
+- Replaced fixed pipeline choices with seven feature buttons: AI Upscale, RIFE Interpolation, NVIDIA Upscale, Frame Generation, Denoise, Deblur and SDR-to-HDR. One spatial and one temporal backend can be selected independently, with optional restoration and final HDR conversion.
+- Added bounded custom processing with selective model forwarding, floating-point AI/RIFE input, high-precision storage, shared preview/progress and atomic output publication. Legacy API/CLI behavior remains available.
+- Verified real AI Upscale → RIFE → NVIDIA HDR inference using CPU models and GPU HDR: four 256×256 HEVC 10-bit/PQ frames. A real browser job also verified custom NVIDIA upscale and a one-second, 24-frame preview. Heavy all-GPU combinations remain untested under current VRAM limits.
+
+## 2026-10-11 — Compact studio and preview rendering
+
+- Replaced the preset/advanced-dialog workflow with compact Source, Preview and always-visible Settings areas; feature buttons expose only relevant processing controls.
+- Removed the redundant restore-only UI choice and Fast/Balanced/Best presets. AI, NVIDIA and Hybrid remain distinct pipelines.
+- Added runtime capability discovery and compatible container/codec filtering, with the same shared matrices validated before inference.
+- Added first-seconds preview rendering with a 1–30 second slider, bounded decode/inference/media mux and separate preview output names.
+- Verified a real browser-submitted NVIDIA HDR preview: 60 video frames at 60 FPS from the first second of a three-second source, with bounded audio. Desktop/mobile layout checks found no JavaScript errors or horizontal overflow.
+
+## 2026-10-11 — NVIDIA VFX pipeline
+
+- Added a separate selectable NVIDIA VFX pipeline without replacing model-based upscaling or RIFE.
+- Added arbitrary-target-FPS RTX Frame Generation, quality presets and SDK shot-change controls.
+- Updated denoise/deblur/upscale SDK handling, separate strengths, RGB10A2 precision and optional final TrueHDR controls.
+- Added precision-preserving rawvideo output, compatible 10-bit encoding, PQ/BT.2020 tagging and independent SDR browser/live previews.
+- Added single/batch setting persistence, explicit zero/false forwarding, stale-model isolation and capability diagnostics.
+- Declared and installed `nvidia-vfx==0.2.0.0`. Linux RTX 5090 small-input GPU and HTTP job renders verified; Windows executables cross-built, Windows VFX inference not tested.
+
+## 2026-09-29
+
+- **Batch folder queue.** `POST /api/jobs/batch` queues every listed input as
+  sequential jobs; `GET /api/batch-folder` lists videos in a folder. The Queue
+  panel gains a Batch Folder Queue dialog (browse → checklist → enqueue).
+  Existing outputs are skipped, so a stopped batch resumes where it ended.
+- **RTX VFX pipeline (`backend/rtx_vfx.py`).** NVIDIA RTX Video SDK
+  (`nvvfx`) support ported from the DaSiWa RTX Upscaler & Refiner ComfyUI
+  node protocol: quality-level attribute resolution, constructor probing,
+  CUDA stream sync with DLPack clone on every effect handoff, direct
+  SDK-output copy into the preallocated row, VFX SDK 1.3 strength parameter,
+  and Streaming Medium/Ultra modes (Ampere+).
+- **Restore pipeline.** `--pipeline restore` runs the RTX VFX denoise/deblur
+  chain at source resolution with no upscale model and source FPS; the chain
+  docks at exactly one streaming stage so effects never run twice.
+- **Streaming memory tuning.** Reader/writer queue depth adapts to frame size
+  vs available RAM; the resource-budget check runs before render start.
+- **FFmpeg 7+ compatibility.** `-vsync` was removed in FFmpeg 7; decode and
+  frame extraction now pick `-fps_mode passthrough` automatically.
+
 ## 2026-09-02
 
 - **Windows support.** The Go server is fully portable (pure Go, no

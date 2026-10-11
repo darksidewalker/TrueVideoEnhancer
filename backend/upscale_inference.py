@@ -255,18 +255,20 @@ class SafetensorsUpscaler:
         """Upload one BGR frame through pinned host memory for iterative CUDA paths."""
         import torch
         rgb = np.ascontiguousarray(frame[..., ::-1].transpose(2, 0, 1)[None])
-        tensor = torch.from_numpy(rgb)
+        tensor = torch.from_numpy(rgb).float().div_(65535.0 if frame.dtype == np.uint16 else 255.0)
         if self.device.type == "cuda":
             tensor = tensor.pin_memory().to(self.device, dtype=self.dtype, non_blocking=True)
         else:
             tensor = tensor.to(self.device, dtype=self.dtype)
-        return tensor.div_(255.0)
+        return tensor
 
     def tensor_to_frame(self, tensor) -> np.ndarray:
         """Download a normalized NCHW RGB tensor once after all iterative passes."""
         import torch
-        output = tensor[0].detach().float().clamp_(0, 1).mul_(255.0).round_().to("cpu")
-        rgb = output.to(torch.uint8).numpy().transpose(1, 2, 0)
+        dtype = getattr(self, 'output_dtype', np.uint8)
+        maximum = 65535.0 if dtype == np.uint16 else 255.0
+        output = tensor[0].detach().float().clamp_(0, 1).mul_(maximum).round_().to("cpu")
+        rgb = output.to(torch.uint16 if dtype == np.uint16 else torch.uint8).numpy().transpose(1, 2, 0)
         return np.ascontiguousarray(rgb[..., ::-1])
 
     def _upscale_tensor_batch(self, tensor):
@@ -337,14 +339,17 @@ class SafetensorsUpscaler:
         padded = frames + [frames[-1]] * (self.batch_size - count)
         rgb = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB).transpose(2, 0, 1) for frame in padded]
         tensor = torch.from_numpy(np.ascontiguousarray(np.stack(rgb)))
-        tensor = tensor.to(self.device, dtype=self.dtype).div_(255.0)
+        maximum = 65535.0 if frames[0].dtype == np.uint16 else 255.0
+        tensor = tensor.float().div_(maximum).to(self.device, dtype=self.dtype)
         with torch.inference_mode():
             output = self.model(tensor)
         if isinstance(output, (tuple, list)):
             output = output[0]
         arrays = output[:count].detach().float().clamp_(0, 1).cpu().numpy()
+        dtype = getattr(self, 'output_dtype', frames[0].dtype)
+        maximum = 65535.0 if dtype == np.uint16 else 255.0
         return [
-            cv2.cvtColor((array.transpose(1, 2, 0) * 255.0 + 0.5).astype(np.uint8), cv2.COLOR_RGB2BGR)
+            cv2.cvtColor((array.transpose(1, 2, 0) * maximum + 0.5).astype(dtype), cv2.COLOR_RGB2BGR)
             for array in arrays
         ]
 
@@ -428,10 +433,13 @@ class ONNXUpscaler:
     def upscale(self, frame: np.ndarray) -> np.ndarray:
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         dtype = np.float16 if "float16" in self.input_type else np.float32
-        tensor = np.ascontiguousarray(rgb.transpose(2, 0, 1)[None]).astype(dtype) / dtype(255.0)
+        maximum = 65535.0 if frame.dtype == np.uint16 else 255.0
+        tensor = (np.ascontiguousarray(rgb.transpose(2, 0, 1)[None]).astype(np.float32) / maximum).astype(dtype)
         output = self.session.run(None, {self.input_name: tensor})[0]
         array = np.asarray(output)[0].clip(0, 1).transpose(1, 2, 0)
-        return cv2.cvtColor((array * 255.0 + 0.5).astype(np.uint8), cv2.COLOR_RGB2BGR)
+        output_dtype = getattr(self, 'output_dtype', frame.dtype)
+        maximum = 65535.0 if output_dtype == np.uint16 else 255.0
+        return cv2.cvtColor((array.astype(np.float32) * maximum + 0.5).astype(output_dtype), cv2.COLOR_RGB2BGR)
 
     def close(self) -> None:
         self.session = None
@@ -441,7 +449,7 @@ def upscale_frame_tiled(frame: np.ndarray, upscaler: Upscaler, *, tile_size: int
                         overlap: int = 16) -> np.ndarray:
     height, width = frame.shape[:2]
     scale = upscaler.scale
-    output = np.empty((height * scale, width * scale, 3), dtype=np.uint8)
+    output = np.empty((height * scale, width * scale, 3), dtype=getattr(upscaler, 'output_dtype', frame.dtype))
     pending = []
     for top in range(0, height, tile_size):
         for left in range(0, width, tile_size):

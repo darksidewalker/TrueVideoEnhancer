@@ -1,173 +1,16 @@
-const $ = (id) => document.getElementById(id);
-let jobEvents = null;
-let runtimeModels = [];
-let sourceProbe = null;
-let currentJob = null;
-let livePreviewTimer = null;
-const maxVisibleLogLines = 500;
-// Persisted model selections: { upscaler: "", interpolation: "" } where "" means Auto.
-const modelSelectionStorageVersion = "auto-dropdown-v1";
-function migrateModelSelectionStorage() {
-  if (localStorage.getItem("model_selection_storage_version") === modelSelectionStorageVersion) return;
-  // Older builds wrote auto-selected model IDs into selected_models. Start the
-  // new dropdown UI in Auto mode so those stale automatic picks do not become
-  // manual overrides.
-  localStorage.removeItem("selected_models");
-  localStorage.setItem("model_selection_storage_version", modelSelectionStorageVersion);
-}
-function getSelectedModels() {
-  migrateModelSelectionStorage();
-  try { return JSON.parse(localStorage.getItem("selected_models") || "{}"); } catch(e) { return {}; }
-}
-function setSelectedModel(category, id) {
-  const sel = getSelectedModels();
-  sel[category] = id;
-  localStorage.setItem("selected_models", JSON.stringify(sel));
-  applySelectionToDropdown(category, id || "");
-}
-function parseModelScale(model) {
-  const text = `${model.id || ""} ${model.name || ""} ${model.file || ""}`.toLowerCase();
-  const match = text.match(/(?:^|[^0-9])([24])x(?:[^0-9]|$)/);
-  return match ? Number(match[1]) : 0;
-}
-
-function selectedModelDestination(category) {
-  const selectID = category === "upscaler" ? "upscaleModel" : "rifeModel";
-  const id = $(selectID)?.value || "";
-  if (!id) return "";
-  const model = runtimeModels.find(function(r){ return r.id === id; });
-  return model ? model.destination : id;
-}
-
-function bestUpscalerModel() {
-  if (!runtimeModels.length || !$("contentType") || !$("scale")) return null;
-  const contentType = $("contentType").value || "mixed";
-  const requestedScale = Number($("overrideUpscaleScale").value || $("scale").value || 1);
-  if (requestedScale < 2) return null;
-
-  const preset = document.querySelector('input[name="preset"]:checked')?.value || "balanced";
-  const preferred = {
-    anime: {
-      2: { fast: "anime-sharp-v4-2x", balanced: "anime-sharp-v4-2x", best: "anime-sharp-v4-quality-2x" },
-      4: { fast: "nomosuni-span-anime-4x", balanced: "nomosuni-span-anime-4x", best: "anime-restoration-4x" },
-    },
-    mixed: {
-      2: { fast: "nomosuni-span-2x", balanced: "nomosuni-span-2x", best: "nomosuni-span-2x" },
-      4: { fast: "nomosuni-span-4x", balanced: "nomosuni-span-4x", best: "ultrasharpv2-4x" },
-    },
-    realism: {
-      2: { fast: "realplksr-restoration-2x", balanced: "realplksr-restoration-2x", best: "realplksr-restoration-2x" },
-      4: { fast: "clearreality-4x", balanced: "clearreality-4x", best: "nomos-webphoto-4x" },
-    },
-  };
-  const preferredID = preferred[contentType]?.[requestedScale]?.[preset];
-  const preferredModel = runtimeModels.find(function(m) { return m.id === preferredID; });
-  if (preferredModel) return preferredModel;
-
-  const upscalers = runtimeModels.filter(function(m) { return m.category === "upscaler"; });
-  const sameContent = upscalers.filter(function(m) { return m.subcategory === contentType; });
-  let candidates = sameContent.filter(function(m) { return parseModelScale(m) === requestedScale; });
-
-  // Mixed content currently has no 2x model. Prefer the realism 2x model for
-  // general/live-action video at 2x; otherwise fall back to the closest model
-  // in the selected content bucket, then any exact-scale upscaler.
-  if (!candidates.length && contentType === "mixed" && requestedScale === 2) {
-    candidates = upscalers.filter(function(m) { return m.subcategory === "realism" && parseModelScale(m) === 2; });
-  }
-  if (!candidates.length && sameContent.length) {
-    candidates = sameContent.slice().sort(function(a, b) {
-      return Math.abs(parseModelScale(a) - requestedScale) - Math.abs(parseModelScale(b) - requestedScale);
-    });
-  }
-  if (!candidates.length) {
-    candidates = upscalers.filter(function(m) { return parseModelScale(m) === requestedScale; });
-  }
-
-  const selected = candidates[0] || null;
-  return selected;
-}
-
-function bestInterpolationModel() {
-  if (!runtimeModels.length || !$("contentType")) return null;
-  const interpolation = runtimeModels.filter(function(m) { return m.category === "interpolation" && !isHeavyRifeModel(m); });
-  if (!interpolation.length) return null;
-  return interpolation[0];
-}
-
-function isHeavyRifeModel(model) {
-  return `${model?.id || ""} ${model?.name || ""} ${model?.file || ""} ${model?.destination || ""}`.toLowerCase().includes("heavy");
-}
-
-function resolvedAutoModel(category) {
-  return category === "upscaler" ? bestUpscalerModel() : bestInterpolationModel();
-}
-
-function resolvedModelDestination(category) {
-  return selectedModelDestination(category) || (resolvedAutoModel(category)?.destination || "");
-}
-
-function applySelectionToDropdown(category, id) {
-  const select = $(category === "upscaler" ? "upscaleModel" : "rifeModel");
-  if (select) select.value = id || "";
-}
-
-function selectBestUpscalerModel() {
-  updateModelAutoLabels();
-  return bestUpscalerModel();
-}
-
-function applySelectionsToFields() {
-  populateAdvancedModelDropdowns();
-  var sel = getSelectedModels();
-  applySelectionToDropdown("upscaler", sel.upscaler || "");
-  applySelectionToDropdown("interpolation", sel.interpolation || "");
-  selectBestUpscalerModel();
-}
-
-function populateAdvancedModelDropdowns() {
-  populateModelDropdown("upscaleModel", "upscaler", "Auto (content/scale/preset)");
-  populateModelDropdown("rifeModel", "interpolation", "Auto (content/preset)");
-  updateModelAutoLabels();
-}
-
-function populateModelDropdown(selectID, category, autoLabel) {
-  const select = $(selectID);
-  if (!select) return;
-  const current = select.value || "";
-  select.innerHTML = "";
-  
-  // Add "No upscale" option first (only for upscaler)
-  if (category === "upscaler") {
-    const noUpscale = document.createElement("option");
-    noUpscale.value = "__no_upscale__";
-    noUpscale.textContent = "No upscale";
-    select.appendChild(noUpscale);
-  }
-  
-  const auto = document.createElement("option");
-  auto.value = "";
-  auto.textContent = autoLabel;
-  select.appendChild(auto);
-  runtimeModels.filter(function(m) { return m.category === category && !(category === "interpolation" && isHeavyRifeModel(m)); }).forEach(function(model) {
-    const option = document.createElement("option");
-    option.value = model.id;
-    option.textContent = `${model.name}${model.present ? "" : " (missing)"}`;
-    select.appendChild(option);
-  });
-  select.value = Array.from(select.options).some(function(option) { return option.value === current; }) ? current : "";
-}
-
-function updateModelAutoLabels() {
-  const upscaler = bestUpscalerModel();
-  const interpolation = bestInterpolationModel();
-  const upAuto = $("upscaleModel")?.querySelector('option[value=""]');
-  const rifeAuto = $("rifeModel")?.querySelector('option[value=""]');
-  if (upAuto) upAuto.textContent = upscaler ? `Auto: ${upscaler.name}` : "Auto (no upscaling)";
-  if (rifeAuto) rifeAuto.textContent = needsInterpolation()
-    ? (interpolation ? `Auto: ${interpolation.name}` : "Auto (default interpolation)")
-    : "Auto: no RIFE (target FPS <= source)";
-}
-
+const $ = id => document.getElementById(id);
+let jobEvents=null, runtimeModels=[], sourceProbe=null, sourceProbePath='', currentJob=null, livePreviewTimer=null;
+let capabilities=null, capabilityError='', probeSerial=0, playbackMode='source', runtimeModelsLoaded=false;
+const maxVisibleLogLines=500;
+const settingsKey='tve_studio_settings_v2';
+let settings={...TVE.defaults};
+function getSelectedModels() { return {upscaler:settings.upscaleModel,interpolation:settings.rifeModel}; }
+function setSelectedModel(category,id) { settings[category==='upscaler'?'upscaleModel':'rifeModel']=id; syncSettings(); persistSettings(); }
+function parseModelScale(m) { return TVE.scaleOf(m); }
+function parseRate(rate) { return TVE.rate(rate); }
+function needsInterpolation() { return TVE.increased(settings,sourceProbe); }
+function applySelectionsToFields() { populateModels(); syncSettings(); }
+function resolvedModelDestination(category) { return (category==='upscaler'?settings.spatialBackend==='ai':settings.temporalBackend==='rife')?TVE.model(category,settings,runtimeModels)?.destination || '':''; }
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: { "Content-Type": "application/json", ...(options.headers || {}) },
@@ -180,41 +23,6 @@ async function api(path, options = {}) {
     throw new Error(data.error || `${response.statusText}${details}`);
   }
   return data;
-}
-
-async function loadSourceProbe(path) {
-  const inputPath = (path || $("input")?.value || "").trim();
-  if (!inputPath) {
-    sourceProbe = null;
-    updateSizeEstimate();
-    return null;
-  }
-  try {
-    const probe = await api(`/api/probe?path=${encodeURIComponent(inputPath)}`);
-    sourceProbe = probe.error ? null : probe;
-    updateSizeEstimate();
-    return sourceProbe;
-  } catch (_) {
-    sourceProbe = null;
-    updateSizeEstimate();
-    return null;
-  }
-}
-
-function parseRate(rate) {
-  if (!rate) return 0;
-  const text = String(rate);
-  if (text.includes("/")) {
-    const parts = text.split("/").map(Number);
-    if (parts[0] > 0 && parts[1] > 0) return parts[0] / parts[1];
-  }
-  return Number(text) || 0;
-}
-
-function needsInterpolation() {
-  const target = Number($("targetFps")?.value || 0);
-  const source = parseRate(sourceProbe?.r_frame_rate);
-  return target > 0 && (!source || target > source + 1e-6);
 }
 
 async function refreshRuntime() {
@@ -314,7 +122,7 @@ async function installRuntime() {
       }, 600 * 1000);
     });
 
-    await refreshRuntime();
+    await refreshRuntime(); await loadCapabilities(); await loadRuntimeModels(); applySelectionsToFields();
   } catch (error) {
     // Error already logged inside the promise above, but handle unexpected ones.
     if (!$("log").textContent.includes(error.message)) {
@@ -329,7 +137,7 @@ async function loadRuntimeModels() {
   if (runtimeModels.length) return;
   try {
     const result = await api("/api/runtime/models");
-    runtimeModels = result.models || [];
+    runtimeModels = result.models || []; runtimeModelsLoaded=true;
   } catch (error) {
     log(`Model list could not be loaded: ${error.message}`);
     runtimeModels = [];
@@ -339,7 +147,7 @@ async function loadRuntimeModels() {
 async function refreshRuntimeModels() {
   try {
     const result = await api("/api/runtime/models");
-    runtimeModels = result.models || [];
+    runtimeModels = result.models || []; runtimeModelsLoaded=true;
   } catch (e) {}
   renderModelList();
   applySelectionsToFields();
@@ -437,9 +245,10 @@ function renderModelRow(box, model) {
     if (model.category === "upscaler" && model.subcategory && $("contentType")) {
       $("contentType").value = model.subcategory;
       const scale = parseModelScale(model);
-      if (scale && $("scale")) $("scale").value = String(scale);
+      if (scale && $("scale")) { settings=TVE.goal(settings,"scale",scale); $("scale").value = String(scale); }
     }
     renderModelList();
+    readSettings(); syncSettings(); persistSettings();
   });
 
   box.appendChild(row);
@@ -490,161 +299,6 @@ async function downloadSingleModel(model) {
   await refreshRuntimeModels();
 }
 
-function collectJob() {
-  return {
-    input: $("input").value.trim(),
-    output: buildOutputPath($("input").value),
-    output_container: $("outputContainer").value,
-    backend: $("backend").value,
-    preset: document.querySelector('input[name="preset"]:checked').value,
-    content_type: $("contentType").value,
-    target_fps: Number($("targetFps").value || 0),
-    scale: Number($("scale").value || 1),
-    upscale_model: resolvedModelDestination("upscaler"),
-    rife_model: resolvedModelDestination("interpolation"),
-    crf: $("crf").value.trim(),
-    video_encoder_preset: $("videoEncoderPreset").value,
-    video_pixel_format: $("videoPixelFormat").value,
-    audio_encoder_preset: $("audioEncoderPreset").value,
-    subtitle_encoder_preset: $("subtitleEncoderPreset").value,
-    audio_bitrate: $("audioBitrate").value.trim(),
-    tile_size: Number($("tileSize").value || 0),
-    tensorrt_dynamic_shapes: $("tensorrtDynamicShapes").checked,
-    tensorrt_opt_profile: Number($("tensorrtOptProfile").value || 0),
-    scene_detect_method: $("sceneDetectMethod").value,
-    scene_detect_threshold: Number($("sceneDetectThreshold").value || 0),
-    custom_encoder: $("customEncoder").value.trim(),
-    override_upscale_scale: Number($("overrideUpscaleScale").value || 0),
-    hdr_mode: $("hdrMode").checked,
-    uhd_mode: $("uhdMode").checked,
-    slomo_mode: $("sloMoMode") ? $("sloMoMode").checked : false,
-    ensemble: $("ensemble").checked,
-    dynamic_optical_flow: $("dynamicOpticalFlow").checked,
-    benchmark: $("benchmarkMode") ? $("benchmarkMode").checked : false,
-    start_time: Number($("startTime").value || 0),
-    end_time: Number($("endTime").value || 0),
-    device: $("deviceSelect") ? $("deviceSelect").value.trim() : "",
-    pytorch_gpu_id: Number($("pytorchGpuId").value || 0),
-    ncnn_gpu_id: Number($("ncnnGpuId").value || 0),
-    dry_run: $("dryRun").checked,
-  };
-}
-
-async function loadSupportedOptions() {
-  try {
-    const options = await api("/api/options");
-    setSelectOptions("outputContainer", options.output_containers, "mp4");
-    setSelectOptions("videoEncoderPreset", options.video_encoder_presets, "auto");
-    setSelectOptions("videoPixelFormat", options.video_pixel_formats, "yuv420p");
-    setSelectOptions("audioEncoderPreset", options.audio_encoder_presets, "copy_audio");
-    setSelectOptions("subtitleEncoderPreset", options.subtitle_encoder_presets, "copy_subtitle");
-    setSelectOptions("sceneDetectMethod", options.scene_detect_methods, "pyscenedetect");
-  } catch (error) {
-    log(`Options could not be loaded: ${error.message}`);
-  }
-}
-
-function setSelectOptions(id, values, selected) {
-  if (!Array.isArray(values)) return;
-  const select = $(id);
-  const current = select.value || "";
-  if (id === "videoEncoderPreset" && !values.includes("auto")) {
-    values = ["auto", ...values];
-  }
-  select.innerHTML = "";
-  for (const value of values) {
-    const option = document.createElement("option");
-    option.value = value;
-    option.textContent = value === "auto" ? "Auto (best for container)" : value;
-    option.selected = value === (current || selected);
-    select.appendChild(option);
-  }
-}
-
-function splitPath(path) {
-  const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
-  const dir = slash >= 0 ? path.slice(0, slash + 1) : "";
-  const file = slash >= 0 ? path.slice(slash + 1) : path;
-  const dot = file.lastIndexOf(".");
-  return { dir, name: dot > 0 ? file.slice(0, dot) : file };
-}
-
-function safeTag(value) {
-  return String(value || "")
-    .trim()
-    .replace(/^.*[\\\/]/, "")
-    .replace(/\.[^.]+$/, "")
-    .replace(/[^\p{L}\p{N}._ -]+/gu, "-")
-    .replace(/\s+/g, "_")
-    .replace(/-+/g, "-")
-    .replace(/^[-_.]+|[-_.]+$/g, "");
-}
-
-function selectedModelTags() {
-  const tags = [];
-  const rife = needsInterpolation() ? (safeTag(resolvedModelDestination("interpolation")) || "rife") : "no_rife";
-  const upscale = safeTag(resolvedModelDestination("upscaler")) || `${$("contentType").value}_${$("scale").value}x`;
-  if (rife) tags.push(rife);
-  if (upscale) tags.push(upscale);
-  return tags;
-}
-
-function audioFilenameTag() {
-  const selected = $("audioEncoderPreset").value || "copy_audio";
-  if (["copy", "copy_audio", ""].includes(selected)) {
-    return sourceProbe?.audio_codec || "audio_copy";
-  }
-  if (selected === "opus") return "opus";
-  if (selected === "vorbis") return "vorbis";
-  return selected;
-}
-
-function outputResolutionTag() {
-  const width = Number(sourceProbe?.width || 0);
-  const height = Number(sourceProbe?.height || 0);
-  const scale = Number($("overrideUpscaleScale").value || $("scale").value || 1);
-  if (width > 0 && height > 0 && scale > 0) return `${Math.round(width * scale)}x${Math.round(height * scale)}`;
-  return `${scale || 1}x`;
-}
-
-function videoCodecTag() {
-  // The backend resolves Auto against the codecs actually available on this
-  // machine. Use an honest placeholder here; the backend replaces it before
-  // encoding and reports the resolved output path back to the worker.
-  return $("videoEncoderPreset").value || "auto";
-}
-
-function buildOutputPath(inputPath) {
-  const input = splitPath(inputPath.trim());
-  if (!input.name) return "";
-  const container = $("outputContainer").value || "mp4";
-  const fps = `${$("targetFps").value || "source"}fps`;
-  const tags = [
-    ...selectedModelTags(),
-    fps,
-    outputResolutionTag(),
-    $("audioBitrate").value || "copy",
-    audioFilenameTag(),
-    videoCodecTag(),
-  ].map(safeTag).filter(Boolean);
-  return `${input.dir}${input.name}${tags.map((tag) => `[${tag}]`).join("")}.${container}`;
-}
-
-async function startJob(event) {
-  event.preventDefault();
-  try {
-    await loadSourceProbe($("input").value);
-    const request = collectJob();
-    const job = await api("/api/jobs", { method: "POST", body: JSON.stringify(request) });
-    currentJob = job;
-    startEncodePreview(job.id);
-    log(`Job ${job.id}\nStatus: ${job.status}\nCommand: python ${job.args.join(" ")}\n`);
-    attachJobEvents(job.id);
-  } catch (error) {
-    log(`Error: ${error.message}`);
-  }
-}
-
 function attachJobEvents(id) {
   if (jobEvents) jobEvents.close();
   jobEvents = new EventSource(`/api/jobs/${id}/events`);
@@ -655,6 +309,9 @@ function attachJobEvents(id) {
   jobEvents.addEventListener("log", (message) => renderJobEvent(JSON.parse(message.data)));
   for (const type of ["done", "error", "cancelled"]) {
     jobEvents.addEventListener(type, (message) => {
+      // EventSource also dispatches transport errors without a JSON payload.
+      // Let onerror fall back to polling; only backend terminal events finish a job.
+      if (typeof message.data !== "string") return;
       jobFinished = true;
       renderJobEvent(JSON.parse(message.data));
       stopEncodePreview();
@@ -675,7 +332,8 @@ function renderJobEvent(event) {
   const job = event.job;
   if (!job) return;
   currentJob = job;
-  renderJobProgress(job);
+
+  updatePlayback();
   const lines = [`Job ${job.id}`, `Status: ${job.status}`, ...(job.logs || []), job.error ? `Error: ${job.error}` : ""].filter(Boolean);
   log(lines.slice(-maxVisibleLogLines).join("\n"), true);
 }
@@ -695,223 +353,6 @@ function log(text, keepScrolled) {
   if (keepScrolled || wasNearBottom) el.scrollTop = el.scrollHeight;
 }
 
-function renderJobProgress(job) {
-  const parsed = parseFrameProgress(job.logs || []);
-  const etaEl = $("etaValue");
-  const progressEl = $("progressValue");
-  if (!etaEl || !progressEl) return;
-  if (["done", "error", "cancelled"].includes(job.status)) {
-    etaEl.textContent = "";
-    progressEl.textContent = "";
-    return;
-  }
-  if (!parsed || !job.started_at) {
-    etaEl.textContent = job.status || "Running";
-    progressEl.textContent = "Waiting for frame progress…";
-    return;
-  }
-  const started = Date.parse(job.started_at);
-  const elapsed = Number.isFinite(started) ? Math.max(0, (Date.now() - started) / 1000) : 0;
-  const rate = elapsed > 0 ? parsed.done / elapsed : 0;
-  const remaining = rate > 0 ? Math.max(0, (parsed.total - parsed.done) / rate) : 0;
-  const pct = parsed.total > 0 ? Math.min(100, Math.round((parsed.done / parsed.total) * 100)) : 0;
-  etaEl.textContent = remaining > 0 ? formatDuration(remaining) : "Calculating…";
-  progressEl.textContent = `${parsed.done}/${parsed.total} frames · ${pct}% · ${rate.toFixed(2)} fps`;
-}
-
-function parseFrameProgress(logs) {
-  let total = 0;
-  let done = 0;
-  for (const line of logs) {
-    let match = line.match(/output_frames=(\d+)/);
-    if (match) total = Number(match[1]);
-    match = line.match(/wrote\s+(\d+)\/(\d+)\s+frames/);
-    if (match) {
-      done = Number(match[1]);
-      total = Number(match[2]);
-    }
-  }
-  return total > 0 ? { done: Math.max(done, 0), total } : null;
-}
-
-function formatDuration(seconds) {
-  seconds = Math.round(seconds);
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = seconds % 60;
-  if (h > 0) return `${h}h ${m}m`;
-  if (m > 0) return `${m}m ${s}s`;
-  return `${s}s`;
-}
-
-function estimateFileSize() {
-  if (!sourceProbe || !sourceProbe.duration) return null;
-
-  const durationMinutes = sourceProbe.duration / 60;
-  const fpsRatio = parseRate(sourceProbe.r_frame_rate) > 0 
-    ? (Number($("targetFps").value || 0) / parseRate(sourceProbe.r_frame_rate))
-    : 1;
-  
-  const scale = Number($("overrideUpscaleScale").value || $("scale").value || 1);
-  const resolutionFactor = (scale * scale);
-  
-  const crf = Number($("crf")?.value || 23);
-  const crfFactor = Math.pow(2, (23 - crf) / 6);
-  
-  // Content-Type-Faktor: Anime/AI-generierter Content komprimiert deutlich besser
-  // als Live-Action-Material (glätte Gradienten, wenig High-Frequency-Detail)
-  const contentType = $("contentType")?.value || "mixed";
-  let contentFactor = 1.0;
-  if (contentType === "anime") {
-    contentFactor = 0.4; // Anime/AI: sehr effiziente Kompression
-  } else if (contentType === "mixed") {
-    contentFactor = 0.6; // Gemischt: moderate Verbesserung
-  }
-  // "realism" bleibt bei 1.0
-  
-  let codecFactor = 1.0;
-  const encoder = $("videoEncoderPreset")?.value || "auto";
-  switch(encoder) {
-    case "x265_nvenc":
-    case "libx265":
-      codecFactor = 0.7; // ~30% kleiner als H.264
-      break;
-    case "av1":
-    case "av1_nvenc":
-      codecFactor = 0.4; // ~60% kleiner als H.264
-      break;
-    case "prores":
-      codecFactor = 10.0; // Sehr große Dateien
-      break;
-    default: // H.264 or auto
-      codecFactor = 1.0;
-  }
-
-  // NEUE Baseline: ~2 MB/min bei 1080p, CRF 23, H.264
-  // Kalibriert an typischen AI-Generated-Videos (LTX-2.3 etc.)
-  // Live-Action wird überschätzt (~2-3x zu hoch)
-  const baseMBPerMin = 2;
-  const estimatedMB = baseMBPerMin * durationMinutes * fpsRatio * resolutionFactor * crfFactor * codecFactor * contentFactor;
-  
-  if (estimatedMB < 1024) {
-    return { size: `${Math.round(estimatedMB)} MB`, details: `~${Math.round(estimatedMB)} MB` };
-  } else {
-    const sizeGB = estimatedMB / 1024;
-    return { size: `${sizeGB.toFixed(1)} GB`, details: `~${Math.round(estimatedMB)} MB` };
-  }
-}
-
-function updateSizeEstimate() {
-  const est = estimateFileSize();
-  const container = $("sizeEstimateContainer");
-  const sizeEl = $("estimatedSize");
-  
-  if (!container) return;
-  
-  if (!est) {
-    container.style.display = "none";
-    return;
-  }
-  
-  container.style.display = "flex";
-  sizeEl.textContent = est.size;
-}
-
-
-function startEncodePreview(jobID) {
-  const panel = document.querySelector(".preview-panel");
-  const img = $("encodePreview");
-  const ph = $("placeholderFrame");
-  if (!img || !jobID) return;
-  if (livePreviewTimer) clearInterval(livePreviewTimer);
-  panel?.classList.add("encoding");
-  img.classList.remove("ready");
-  if (ph) ph.style.display = "";
-  const loader = new Image();
-  loader.onload = () => {
-    // Only show the frame once the browser confirms it decoded successfully.
-    img.src = loader.src;
-    img.classList.add("ready");
-    if (ph) ph.style.display = "none";
-  };
-  const refresh = async () => {
-    try {
-      const response = await fetch(`/api/jobs/${encodeURIComponent(jobID)}/live-preview?t=${Date.now()}`, { cache: "no-store" });
-      if (!response.ok) return;
-      loader.src = response.url;
-    } catch (_) {
-      // Keep the previous frame visible; the next tick can recover.
-    }
-  };
-  refresh();
-  livePreviewTimer = setInterval(refresh, 1000);
-}
-
-function stopEncodePreview() {
-  if (livePreviewTimer) {
-    clearInterval(livePreviewTimer);
-    livePreviewTimer = null;
-  }
-  document.querySelector(".preview-panel")?.classList.remove("encoding");
-}
-
-async function openOutputFolder() {
-  try {
-    const payload = currentJob?.id ? { job: currentJob.id } : { path: buildOutputPath($("input").value) };
-    await api("/api/open-folder", { method: "POST", body: JSON.stringify(payload) });
-  } catch (error) {
-    log(`Open output folder failed: ${error.message}`, true);
-  }
-}
-
-async function quitApp() {
-  if (!confirm("Quit DaSiWa True Video Enhancer?")) return;
-  log("Shutting down app…");
-  try {
-    await api("/api/quit", { method: "POST" });
-  } catch (error) {
-    log(`Shutdown requested, response failed: ${error.message}`);
-  }
-  setTimeout(() => {
-    window.close();
-    document.body.innerHTML = '<main class="shell"><section class="panel"><h1>App shut down</h1><p>You can now close this tab.</p></section></main>';
-  }, 150);
-}
-
-// --- Event wiring (bottom of file) ---
-
-$("checkBackendBtn").addEventListener("click", runBackendCheck);
-$("installRuntime").addEventListener("click", installRuntime);
-$("quitApp").addEventListener("click", quitApp);
-$("jobForm").addEventListener("submit", startJob);
-$("openOutputFolder").addEventListener("click", openOutputFolder);
-$("input").addEventListener("change", function() { 
-  loadSourceProbe(this.value);
-  updateSizeEstimate();
-});
-$("targetFps").addEventListener("input", function() {
-  updateModelAutoLabels();
-  updateSizeEstimate();
-});
-$("openTune").addEventListener("click", () => $("tuneDialog").showModal());
-$("contentType").addEventListener("change", selectBestUpscalerModel);
-document.querySelectorAll('input[name="preset"]').forEach(function(input) {
-  input.addEventListener("change", selectBestUpscalerModel);
-});
-$("scale").addEventListener("change", function() {
-  selectBestUpscalerModel();
-  updateSizeEstimate();
-});
-$("overrideUpscaleScale").addEventListener("input", function() {
-  selectBestUpscalerModel();
-  updateSizeEstimate();
-});
-$("videoEncoderPreset").addEventListener("change", updateSizeEstimate);
-$("crf").addEventListener("input", updateSizeEstimate);
-$("upscaleModel").addEventListener("change", function() { setSelectedModel("upscaler", this.value || ""); updateModelAutoLabels(); });
-$("rifeModel").addEventListener("change", function() { setSelectedModel("interpolation", this.value || ""); updateModelAutoLabels(); });
-
-// File browser button -> open file picker dialog
 let currentBrowsePath = "";
 function getSavedBrowsePath() {
   const match = document.cookie.match(/(?:^|;\s*)last_browse_path=([^;]+)/);
@@ -945,6 +386,7 @@ async function browseDir(path) {
   updatePathBar(path);
   try {
     const data = await api("/api/browse?path=" + encodeURIComponent(path));
+    currentBrowsePath=data.path; updatePathBar(data.path);
     renderFileList(data.items, false);
   } catch (err) {
     $("fileList").innerHTML = `<p class="warning">Browse error: ${err.message}</p>`;
@@ -1053,22 +495,195 @@ function renderFileList(items, isSearch) {
   }
 }
 
-// Search input: debounce + enter key
-$("fileSearchInput").addEventListener("input", function() {
-  var q = this.value.trim();
-  searchFiles(q);
-});
+async function openOutputFolder() {
+  try {
+    const payload = currentJob?.id ? { job: currentJob.id } : { path: buildOutputPath($("input").value) };
+    await api("/api/open-folder", { method: "POST", body: JSON.stringify(payload) });
+  } catch (error) {
+    log(`Open output folder failed: ${error.message}`, true);
+  }
+}
 
-// Close file browser dialog X button
-$("closeFileBrowserX").addEventListener("click", () => $("fileBrowserDialog").close());
-$("fileBrowserDialog").addEventListener("click", (e) => { if (e.target.id === "fileBrowserDialog") $("fileBrowserDialog").close(); });
+async function quitApp() {
+  if (!confirm("Quit DaSiWa True Video Enhancer? Active and queued jobs will be cancelled.")) return;
+  log("Shutting down app…");
+  try {
+    await api("/api/quit", { method: "POST" });
+  } catch (error) {
+    log(`Shutdown failed: ${error.message}`);
+    return;
+  }
+  setTimeout(() => {
+    window.close();
+    document.body.innerHTML = '<main class="shell"><section class="panel"><h1>Shutdown requested</h1><p>The app is stopping its jobs. You can close this tab.</p></section></main>';
+  }, 150);
+}
 
-$("closeDialogX").addEventListener("click", () => $("tuneDialog").close());
-$("closeCheckX").addEventListener("click", () => $("checkDialog").close());
-$("openModelsBtn").addEventListener("click", refreshRuntimeModels); // fetch fresh + open dialog
-$("modelsDialog").addEventListener("click", (e) => { if (e.target.id === "closeModelsX") $("modelsDialog").close(); });
 
-// Load models on startup (populates runtimeModels array; list renders when button is clicked)
-loadRuntimeModels().then(() => applySelectionsToFields()); // auto-fill advanced settings from persisted selections
-loadSupportedOptions();
-refreshRuntime();
+function persistSettings() { try { localStorage.setItem(settingsKey,JSON.stringify(settings)); } catch (_) {} }
+function restoreSettings() {
+  try {
+    const current=localStorage.getItem(settingsKey);
+    if (current) settings=TVE.migrate(JSON.parse(current));
+    else settings=TVE.migrate(JSON.parse(localStorage.getItem('tve_vfx_settings_v1')||'{}'));
+    for (const key of ['tve_vfx_settings_v1','selected_models','model_selection_storage_version']) localStorage.removeItem(key);
+  } catch (_) { settings={...TVE.defaults}; }
+}
+function readSettings() {
+  for (const key of Object.keys(TVE.defaults)) {
+    const el=$(key);
+    if (!el || el.tagName==='BUTTON' || (!runtimeModelsLoaded && ['upscaleModel','rifeModel'].includes(key))) continue;
+    settings[key]=el.type==='checkbox'?el.checked:el.value;
+  }
+}
+function show(id,visible) { $(id).hidden=!visible; }
+function pressed(id,value,disabled=false) {
+  $(id).setAttribute('aria-pressed',String(!!value)); $(id).disabled=disabled;
+}
+function populateModels() {
+  for (const [id,category] of [['upscaleModel','upscaler'],['rifeModel','interpolation']]) {
+    $(id).replaceChildren(new Option('Auto · '+(category==='upscaler'?'content / scale':'general RIFE'),''));
+    for (const m of runtimeModels.filter(m=>m.category===category && m.present && !/heavy/i.test(`${m.id} ${m.name}`))) $(id).add(new Option(m.name,m.id));
+    if (runtimeModelsLoaded && !runtimeModels.some(m=>m.id===settings[id] && m.present)) settings[id]='';
+  }
+}
+function fillOptions(id,values,label=v=>v) {
+  const select=$(id), old=select.value;
+  select.replaceChildren(...values.map(v=>new Option(label(v),v)));
+  select.value=values.includes(old)?old:values[0]||'';
+}
+function syncSettings() {
+  settings=TVE.normalize(settings,sourceProbe);
+  const ai=settings.spatialBackend==='ai'||settings.temporalBackend==='rife', sdk=TVE.hasSDK(settings), v=capabilities?.vfx || {};
+  for (const key of Object.keys(TVE.defaults)) {
+    const el=$(key); if (!el || el.tagName==='BUTTON') continue;
+    if (el.type==='checkbox') el.checked=!!settings[key]; else el.value=settings[key];
+  }
+  for (const option of $('outputContainer').options) option.disabled=!capabilities?.containers?.includes(option.value) || !TVE.codecChoices({...settings,outputContainer:option.value},capabilities).length;
+  const choices=TVE.codecChoices(settings,capabilities);
+  fillOptions('videoEncoderPreset',choices,v=>({auto:'Auto',av1_nvenc:'AV1 · NVENC',x265_nvenc:'HEVC · NVENC',x264_nvenc:'H.264 · NVENC',av1:'AV1 · CPU',libx265:'HEVC · CPU',libx264:'H.264 · CPU',vp9:'VP9',prores:'ProRes',ffv1:'FFV1'}[v]||v));
+  if (choices.length && !choices.includes(settings.videoEncoderPreset)) settings.videoEncoderPreset=choices.includes('auto')?'auto':choices[0];
+  $('videoEncoderPreset').value=settings.videoEncoderPreset;
+  for (const id of ['denoiseQuality','deblurQuality','rtxUpscaleQuality']) {
+    for (const option of $(id).options) option.disabled=sdk && !v.quality_levels?.some(level=>level.toLowerCase()===option.value.toLowerCase());
+  }
+  for (const option of $('rtxUpscale').options) option.disabled=option.value.startsWith('Streaming') && !v.streaming?.includes(option.value);
+  $('rtxImageEncoding').options[1].disabled=!v.encoding || (settings.temporalBackend==='nvidia' && !v.frame_generation_encoding);
+  const selected={aiUpscale:settings.spatialBackend==='ai',nvidiaUpscale:settings.spatialBackend==='nvidia',rifeInterpolation:settings.temporalBackend==='rife',nvidiaFrameGeneration:settings.temporalBackend==='nvidia',denoise:settings.denoise,deblur:settings.deblur,rtxHDR:settings.rtxHDR};
+  for (const [id,on] of Object.entries(selected)) {
+    const reason=TVE.featureUnavailable(id,settings,sourceProbe,capabilities,runtimeModels);
+    // Unavailable selected features stay removable; never silently change the graph.
+    pressed(id,on,!!reason && !on); $(id).title=reason;
+  }
+  show('aiControls',ai); show('nativeControls',sdk);
+  show('upscaleModelControls',settings.spatialBackend==='ai'); show('rifeControls',settings.temporalBackend==='rife');
+  $('tileSize').closest('label').hidden=settings.spatialBackend!=='ai';
+  show('denoiseControls',settings.denoise); show('deblurControls',settings.deblur);
+  for (const id of ['rtxDenoiseStrength','rtxDeblurStrength','rtxUpscaleStrength']) $(id).closest('label').hidden=!v.strength;
+  show('sdkUpscaleControls',settings.spatialBackend==='nvidia'); show('fgControls',settings.temporalBackend==='nvidia');
+  show('hdrControls',settings.rtxHDR); show('precisionNote',settings.rtxHDR||(sdk&&settings.rtxImageEncoding==='rgb10a2'));
+  $('contentType').closest('label').hidden=!ai;
+  $('settingsTitle').textContent='Mix & match';
+  $('pipelinePlan').textContent=TVE.stages(settings,sourceProbe,runtimeModels).join(' → ');
+  for (const [id,category] of [['upscaleModel','upscaler'],['rifeModel','interpolation']]) {
+    const m=TVE.model(category,{...settings,[id]:''},runtimeModels);
+    if ($(id).options[0]) $(id).options[0].textContent=m?`Auto · ${m.name}`:'Auto · matching model not installed';
+  }
+  const seconds=TVE.previewSeconds(settings,sourceProbe);
+  $('previewSeconds').max=String(Math.min(30,Math.max(1,Number(sourceProbe?.duration)||30)));
+  $('previewSeconds').value=String(seconds); settings.previewSeconds=seconds;
+  $('previewSeconds').disabled=!settings.preview; $('previewSecondsValue').textContent=`${seconds.toFixed(1).replace(/\.0$/,'')} s`;
+  const errors=TVE.issues(settings,sourceProbePath===$('input').value.trim()?sourceProbe:null,capabilities,runtimeModels);
+  if (!$('input').value.trim()) errors.unshift('Select an input video.');
+  $('runJob').disabled=errors.length>0;
+  $('runJob').textContent=settings.preview?'▶ Run preview':'▶ Run full video';
+  $('requestStatus').textContent=errors.length?errors.join(' '):settings.preview?`Process the first ${seconds} seconds with these settings.`:'Ready · entire video, no duration limit.';
+  $('requestStatus').classList.toggle('warning',errors.length>0);
+  const fps=TVE.sourceFPS(sourceProbe), w=Number(sourceProbe?.width)||0,h=Number(sourceProbe?.height)||0;
+  $('sourceDetails').textContent=sourceProbe?`${w} × ${h} · ${fps.toFixed(3).replace(/0+$/,'').replace(/\.$/,'')} fps · ${Number(sourceProbe.duration||0).toFixed(1)} s · ${sourceProbe.codec_name||'video'}`:'Select a readable video to inspect source FPS.';
+}
+async function loadCapabilities() {
+  try { capabilities=await api('/api/capabilities'); capabilityError=''; }
+  catch (error) { capabilities=null; capabilityError=error.message; }
+  syncSettings();
+  if (capabilityError) $('requestStatus').textContent=`Capabilities unavailable: ${capabilityError}. Retry ↻ before running.`;
+}
+async function probeForRequest(path) {
+  const probe=await api(`/api/probe?path=${encodeURIComponent(path)}`);
+  if (probe.error || !(TVE.sourceFPS(probe)>0)) throw new Error(probe.error || 'Could not determine source FPS.');
+  return probe;
+}
+async function loadSourceProbe(path) {
+  const serial=++probeSerial, input=(path||'').trim();
+  sourceProbe=null; sourceProbePath=''; syncSettings(); updatePlayback();
+  if (!input) return null;
+  try {
+    const probe=await probeForRequest(input);
+    if (serial!==probeSerial || $('input').value.trim()!==input) return null;
+    sourceProbe=probe; sourceProbePath=input; syncSettings(); updatePlayback(); return probe;
+  } catch (error) { if (serial===probeSerial) { syncSettings(); $('sourceDetails').textContent=error.message; } return null; }
+}
+function captureSettings() { readSettings(); return {...settings}; }
+function captureJobRequest(snapshot=captureSettings(),probe=sourceProbe,input=$('input').value.trim()) {
+  return TVE.request(snapshot,probe,capabilities,runtimeModels,input);
+}
+function buildOutputPath(input) { return TVE.outputPath({input,output_container:settings.outputContainer}); }
+function updatePlayback() {
+  const job=currentJob, done=job?.status==='done', running=job?.status==='running';
+  $('processedPlayback').disabled=!(done||running);
+  if (playbackMode==='processed' && !done && !running) playbackMode='source';
+  pressed('sourcePlayback',playbackMode==='source'); pressed('processedPlayback',playbackMode==='processed',!(done||running));
+  const video=$('videoPreview'), img=$('encodePreview');
+  let url='';
+  if (playbackMode==='processed') {
+    if (done) url=`/api/jobs/${encodeURIComponent(job.id)}/preview?quality=native-v2`;
+  } else if ($('input').value.trim()) url=`/api/stream?path=${encodeURIComponent($('input').value.trim())}`;
+  const liveFrame=playbackMode==='processed' && running && img.dataset.previewJobId===job.id;
+  video.hidden=!url; img.hidden=!liveFrame;
+  $('placeholderFrame').hidden=!!url || liveFrame;
+  $('placeholderFrame').textContent=playbackMode==='processed' && running?'Waiting for processed frames…':'Select a video to preview.';
+  if (url && video.getAttribute('src')!==url) { video.src=url; video.load(); }
+  if (!url) { video.pause(); video.removeAttribute('src'); }
+  $('playbackStatus').textContent=playbackMode==='processed'?(done?'Processed · native resolution/FPS · first 20 s · SDR browser proxy (HDR tone-mapped).':'Live processed frames · native resolution · JPEG preview before video encoding.'):'Source · browser playback depends on its codec.';
+}
+function startEncodePreview(jobID) {
+  stopEncodePreview();
+  const refresh=()=>{ if (currentJob?.id===jobID && playbackMode==='processed' && currentJob.status==='running') $('encodePreview').src=`/api/jobs/${encodeURIComponent(jobID)}/live-preview?t=${Date.now()}`; };
+  refresh(); livePreviewTimer=setInterval(refresh,1000);
+}
+function stopEncodePreview() { if (livePreviewTimer) clearInterval(livePreviewTimer); livePreviewTimer=null; }
+function wireStudio() {
+  restoreSettings(); populateModels(); syncSettings();
+  for (const key of Object.keys(TVE.defaults)) {
+    const el=$(key); if (!el || el.tagName==='BUTTON') continue;
+    el.addEventListener('input',()=>{
+      readSettings();
+      if (key==='scale' || key==='targetFps') settings=TVE.goal(settings,key,settings[key]);
+      syncSettings(); persistSettings();
+    });
+  }
+  for (const id of ['aiUpscale','rifeInterpolation','nvidiaUpscale','nvidiaFrameGeneration','denoise','deblur','rtxHDR']) $(id).addEventListener('click',()=>{
+    settings=TVE.toggle(settings,id,sourceProbe); syncSettings(); persistSettings();
+  });
+  $('retryCapabilities').addEventListener('click',loadCapabilities);
+  $('input').addEventListener('input',()=>{sourceProbe=null; sourceProbePath=''; syncSettings();});
+  $('input').addEventListener('change',()=>loadSourceProbe($('input').value));
+  for (const mode of ['source','processed']) $(mode+'Playback').addEventListener('click',()=>{playbackMode=mode;updatePlayback();});
+  $('videoPreview').addEventListener('error',()=>{$('playbackStatus').textContent='This video cannot play in this browser. The file remains available in the output folder.';});
+  $('encodePreview').addEventListener('load',()=>{
+    const image=$('encodePreview');
+    const expected=`/api/jobs/${encodeURIComponent(currentJob?.id||'')}/live-preview`;
+    if (image.naturalWidth>0 && new URL(image.currentSrc,location.href).pathname===expected) image.dataset.previewJobId=currentJob.id;
+    updatePlayback();
+  });
+  $('encodePreview').addEventListener('error',()=>{delete $('encodePreview').dataset.previewJobId;updatePlayback();});
+  $('browseInput').addEventListener('click',()=>{currentBrowsePath=currentBrowsePath||getSavedBrowsePath()||homeDir();openFileBrowser();});
+  $('fileSearchInput').addEventListener('input',()=>searchFiles($('fileSearchInput').value));
+  $('closeFileBrowserX').addEventListener('click',()=>$('fileBrowserDialog').close());
+  $('checkBackendBtn').addEventListener('click',runBackendCheck); $('installRuntime').addEventListener('click',installRuntime);
+  $('quitApp').addEventListener('click',quitApp); $('openOutputFolder').addEventListener('click',openOutputFolder);
+  $('closeCheckX').addEventListener('click',()=>$('checkDialog').close());
+  $('openModelsBtn').addEventListener('click',refreshRuntimeModels); $('closeModelsX').addEventListener('click',()=>$('modelsDialog').close());
+  loadRuntimeModels().then(applySelectionsToFields); loadCapabilities(); refreshRuntime();
+}
+wireStudio();

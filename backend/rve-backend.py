@@ -25,6 +25,16 @@ _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
+if "--vfx-capabilities" in sys.argv and __name__ == "__main__":
+    from rtx_vfx import capabilities
+    print(json.dumps(capabilities()))
+    raise SystemExit(0)
+
+if "--render-capabilities" in sys.argv and __name__ == "__main__":
+    from render_contract import render_capabilities
+    print(json.dumps(render_capabilities()))
+    raise SystemExit(0)
+
 try:
     import cv2
     import numpy as np
@@ -67,10 +77,11 @@ else:
 from upscale_inference import create_optimized_upscaler
 from streaming_pipeline import (
     FrameProcessor, RawVideoReader, RawVideoWriter, encode_command,
-    resolve_output_codec_path, stream_frames, validate_resource_budget,
+    queue_size_for_frame, resolve_output_codec_path, stream_frames,
+    validate_resource_budget, _vsync_args,
 )
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 SUPPORTED_VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v"}
 
 _COLOR = sys.stderr.isatty() or os.environ.get("FORCE_COLOR") in {"1", "true", "yes"}
@@ -92,8 +103,8 @@ def log(tag: str, message: str, *, detail: str | None = None) -> None:
     print(line, file=sys.stderr)
 
 
-def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+def _run(cmd: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout)
 
 
 def _ffmpeg() -> str:
@@ -179,7 +190,7 @@ def resolve_model_path(path_or_id: str) -> str:
 def extract_source_frames(input_path: str, frame_dir: Path) -> list[Path]:
     frame_dir.mkdir(parents=True, exist_ok=True)
     pattern = str(frame_dir / "%08d.png")
-    cmd = [_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-i", input_path, "-vsync", "0", pattern]
+    cmd = [_ffmpeg(), "-hide_banner", "-loglevel", "error", "-y", "-i", input_path, *_vsync_args(), pattern]
     proc = _run(cmd)
     if proc.returncode != 0:
         raise RuntimeError(f"ffmpeg frame extraction failed: {proc.stderr.strip()}")
@@ -313,11 +324,8 @@ def emit_live_preview(frame) -> None:
     """
     if frame is None or cv2 is None:
         return
-    height, width = frame.shape[:2]
-    if width > 640:
-        scale = 640 / float(width)
-        frame = cv2.resize(frame, (640, max(2, int(height * scale))), interpolation=cv2.INTER_AREA)
-    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+    # Preserve processed pixels: UI fitting must not destroy output detail.
+    ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
     if not ok:
         return
     import base64
@@ -339,6 +347,8 @@ def derive_output_resolution(width: int, height: int, scale: int, override_scale
 
 
 def encoder_args(encoder: str, crf: str, pix_fmt: str) -> list[str]:
+    from render_contract import canonical_preset
+    encoder = canonical_preset(encoder)
     enc = (encoder or "libx264").strip()
     quality = crf or "18"
     pix = pix_fmt or "yuv420p"
@@ -352,6 +362,8 @@ def encoder_args(encoder: str, crf: str, pix_fmt: str) -> list[str]:
         return ["-c:v", "libx265", "-preset", "medium", "-crf", quality, "-pix_fmt", pix]
     if enc == "vp9":
         return ["-c:v", "libvpx-vp9", "-crf", quality, "-b:v", "0", "-pix_fmt", pix]
+    if enc == "vp8":
+        return ["-c:v", "libvpx", "-crf", quality, "-b:v", "0", "-pix_fmt", pix]
     if enc == "av1":
         return ["-c:v", "libsvtav1", "-crf", quality, "-preset", "6", "-pix_fmt", pix]
     if enc == "prores":
@@ -366,27 +378,14 @@ def available_ffmpeg_encoders() -> set[str]:
     if proc.returncode != 0:
         log("WARN", "Could not query FFmpeg encoders; using conservative fallback", detail=proc.stderr.strip())
         return set()
-    encoders: set[str] = set()
-    for line in proc.stdout.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and parts[0].startswith("V"):
-            encoders.add(parts[1])
-    return encoders
+    from render_contract import parse_video_encoders
+    return parse_video_encoders(proc.stdout)
 
 
 def ffmpeg_codec_name(preset: str) -> str:
-    enc = (preset or "").strip()
-    if enc in {"x264_nvenc", "h264_nvenc"}:
-        return "h264_nvenc"
-    if enc in {"x265_nvenc", "hevc_nvenc"}:
-        return "hevc_nvenc"
-    if enc == "av1":
-        return "libsvtav1"
-    if enc == "vp9":
-        return "libvpx-vp9"
-    if enc == "vp8":
-        return "libvpx"
-    return enc
+    from render_contract import CODECS, canonical_preset
+    enc = (preset or '').strip()
+    return CODECS.get(canonical_preset(enc), enc)
 
 
 def container_name(output_video: str) -> str:
@@ -394,31 +393,40 @@ def container_name(output_video: str) -> str:
 
 
 def container_video_candidates(container: str) -> list[str]:
-    # Preference order: modern/efficient first, then broadly compatible fallbacks.
-    if container == "webm":
-        return ["av1_nvenc", "vp9", "vp8", "av1"]
-    if container in {"mp4", "m4v"}:
-        return ["av1_nvenc", "x265_nvenc", "x264_nvenc", "libx265", "libx264", "av1"]
-    if container in {"mov", "mkv"}:
-        return ["av1_nvenc", "x265_nvenc", "x264_nvenc", "libx265", "libx264", "av1", "prores", "ffv1"]
-    if container == "ts":
-        return ["x265_nvenc", "x264_nvenc", "libx265", "libx264"]
-    if container == "flv":
-        return ["x264_nvenc", "libx264"]
-    if container == "avi":
-        return ["x264_nvenc", "libx264", "ffv1"]
-    return ["av1_nvenc", "x265_nvenc", "x264_nvenc", "av1", "libx265", "libx264"]
+    from render_contract import codec_candidates
+    return codec_candidates(container)
 
 
-def is_video_preset_supported(preset: str, encoders: set[str]) -> bool:
+def is_video_preset_supported(preset: str, encoders: set[str], *, precise: bool = False) -> bool:
+    from render_contract import CODECS, TEN_BIT, canonical_preset
+    preset = canonical_preset(preset)
     codec = ffmpeg_codec_name(preset)
-    if encoders and codec not in encoders:
+    if preset not in CODECS or (encoders and codec not in encoders):
         return False
-    proc = _run([
-        _ffmpeg(), "-hide_banner", "-loglevel", "error", "-y",
-        "-f", "lavfi", "-i", "color=c=black:s=64x64:r=1",
-        "-frames:v", "1", "-c:v", codec, "-f", "null", "-",
-    ])
+    if precise and preset not in TEN_BIT:
+        return False
+    # AV1 NVENC rejects 64/128px probes. All offered codecs accept this aligned
+    # 256px test frame; use production quality/profile options, not codec defaults.
+    pix = ('yuv422p10le' if preset == 'prores' else
+           'p010le' if precise and codec.endswith('_nvenc') else
+           'yuv420p10le' if precise else 'yuv420p')
+    video = encoder_args(preset, '18', pix)
+    video[video.index('-pix_fmt') + 1] = '+' + pix
+    try:
+        proc = _run([
+            _ffmpeg(), '-hide_banner', '-loglevel', 'error', '-y',
+            '-f', 'lavfi', '-i', 'color=c=black:s=256x256:r=24',
+            '-frames:v', '1', '-vf', 'scale=256:256,format=' + pix,
+            *video, '-threads', '2', '-f', 'null', '-',
+        ], timeout=20)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        log('WARN', 'FFmpeg encoder preflight failed',
+            detail=f'encoder={codec} pixel_format={pix}: {error}')
+        return False
+    if proc.returncode != 0:
+        detail = ' '.join((proc.stderr or proc.stdout or 'no FFmpeg diagnostic').split())[-2000:]
+        log('WARN', 'FFmpeg encoder preflight failed',
+            detail=f'encoder={codec} pixel_format={pix} exit={proc.returncode}: {detail}')
     return proc.returncode == 0
 
 
@@ -492,8 +500,32 @@ def webm_safe_settings(output_video: str, encoder: str, audio_encoder: str,
 
 def normalize_encode_settings(output_video: str, encoder: str, audio_encoder: str,
                               subtitle_encoder: str, input_audio_codec: str,
-                              input_subtitle_codec: str) -> tuple[str, str, str]:
-    video = normalize_video_encoder(output_video, encoder)
+                              input_subtitle_codec: str, *, hdr: bool = False,
+                              precise: bool = False) -> tuple[str, str, str]:
+    from render_contract import CODECS, canonical_preset, codec_candidates
+    container = container_name(output_video)
+    candidates = codec_candidates(container, hdr=hdr, precise=precise)
+    if not candidates:
+        raise ValueError(f"Unsupported container {container!r} for HDR/precision={hdr or precise}")
+    requested = canonical_preset((encoder or 'auto').strip())
+    # Historical SDR WebM requests may normalize video/audio/subtitles.
+    if container == 'webm' and not (hdr or precise) and requested not in candidates and requested != 'auto':
+        requested = 'vp9'
+        log('WARN', 'WebM video codec normalized to VP9', detail=f'requested={encoder}')
+    if requested != 'auto' and requested not in candidates:
+        raise ValueError(f"Encoder {encoder!r} is incompatible with {container} (HDR={hdr}, precise={precise})")
+    encoders = available_ffmpeg_encoders()
+    if requested != 'auto':
+        if CODECS[requested] not in encoders:
+            raise ValueError(f"Requested encoder {encoder!r} is unavailable in FFmpeg")
+        if not is_video_preset_supported(requested, encoders, precise=hdr or precise):
+            raise ValueError(f"Requested encoder {encoder!r} failed its FFmpeg preflight")
+        video = requested
+    else:
+        video = next((p for p in candidates if CODECS[p] in encoders and is_video_preset_supported(p, encoders, precise=hdr or precise)), None)
+        if video is None:
+            raise ValueError(f"No supported encoder for {container} (HDR={hdr}, precise={precise})")
+        log('TECH', 'auto video encoder selected', detail=f'container={container} encoder={video}')
     return webm_safe_settings(
         output_video,
         video,
@@ -551,9 +583,20 @@ def encode_video(input_video: str, output_video: str, frame_dir: Path, fps: floa
 
 
 def render(args) -> None:
+    from render_contract import preview_output_path, validate_preview_seconds
+    duration = validate_preview_seconds(getattr(args, 'preview_seconds', 0))
+    args.output = preview_output_path(args.output, duration)
+    if getattr(args, 'processing_mode', 'legacy') == 'custom' or getattr(args, "pipeline", "upscale") == "nvidia-vfx":
+        from nvidia_vfx_pipeline import render_nvidia
+        return render_nvidia(args, sys.modules[__name__])
+    from render_progress import RenderProgress, frame_total
+    render_progress = RenderProgress()
+    render_progress.preparing()
     log("PIPE", "DaSiWa TrueVideoEnhancer backend start", detail=f"version={VERSION}")
     log("PIPE", f"input={args.input}", detail=f"output={args.output}")
     info = probe_video(args.input)
+    if duration and info['duration'] > 0:
+        duration = min(duration, info['duration'])
     log("TECH", "video_probe", detail=f"source={info['width']}x{info['height']} fps={info['fps']:.6g} duration={info['duration']:.3f}s")
     requested_video_encoder = (args.video_encoder_preset or "auto").strip() or "auto"
     args.video_encoder_preset, args.audio_encoder_preset, args.subtitle_encoder_preset = normalize_encode_settings(
@@ -568,12 +611,41 @@ def render(args) -> None:
     resolved_output = resolve_output_codec_path(
         args.output, requested_video_encoder, resolved_codec,
     )
+    from render_contract import validate_output_path
+    validate_output_path(args.input, resolved_output, args.overwrite)
     if resolved_output != args.output:
         args.output = resolved_output
         print(f"<OUTPUT_PATH>{args.output}", file=sys.stderr, flush=True)
     print(f"<VIDEO_CODEC>{resolved_codec}", file=sys.stderr, flush=True)
     output_fps, factor = derive_target_fps(info["fps"], args.target_fps)
     
+    pipeline = getattr(args, "pipeline", "upscale")
+    rtx_upscale_mode = getattr(args, "rtx_upscale", "Off")
+    rtx_effects = bool(getattr(args, "denoise", False) or getattr(args, "deblur", False)
+                       or rtx_upscale_mode != "Off")
+    if pipeline in ("restore", "restore+upscale") and not (
+        getattr(args, "denoise", False) or getattr(args, "deblur", False)
+    ):
+        log("WARN", "restore pipeline enables RTX denoise+deblur automatically")
+        args.denoise = True
+        args.deblur = True
+        rtx_effects = True
+    if pipeline == "restore":
+        if args.scale != 1:
+            log("WARN", "restore pipeline forces scale=1 (restoration-only, no scaling)")
+            args.scale = 1
+        args.override_upscale_scale = 0
+        if args.upscale_model:
+            log("WARN", "restore pipeline ignores the upscale model; RTX VFX effects only")
+            args.upscale_model = ""
+        if factor > 1.0:
+            log("WARN", "restore pipeline skips frame interpolation; keeping source FPS")
+            args.target_fps = 0.0
+            output_fps, factor = derive_target_fps(info["fps"], 0.0)
+    if pipeline == "restore+upscale" and rtx_upscale_mode != "Off":
+        log("WARN", "restore+upscale uses the AI upscale model; RTX VFX upscale mode forced to Off")
+        rtx_upscale_mode = "Off"
+
     target_scale = args.override_upscale_scale or args.scale
     output_width, output_height = derive_output_resolution(
         info["width"], info["height"], args.scale, args.override_upscale_scale,
@@ -592,6 +664,41 @@ def render(args) -> None:
     interpolator = build_interpolator(args, info["width"], info["height"]) if factor > 1.0 else None
     upscaler = None
     tile_size = 0
+    restorer = None
+    vfx_upscaler = None
+    vfx_pipeline_obj = None
+    if rtx_effects:
+        from rtx_vfx import RTXVfxPipeline
+        vfx_pipeline_obj = RTXVfxPipeline(
+            denoise=getattr(args, "denoise", False),
+            denoise_quality=getattr(args, "denoise_quality", "Ultra"),
+            deblur=getattr(args, "deblur", False),
+            deblur_quality=getattr(args, "deblur_quality", "Ultra"),
+            upscale_mode=rtx_upscale_mode,
+            upscale_quality=getattr(args, "rtx_upscale_quality", "Ultra"),
+            strength=getattr(args, "vsr_strength", 0.0) or 1.0,
+            denoise_strength=getattr(args, "vsr_strength", 0.0) or getattr(args, "rtx_denoise_strength", 1.0),
+            deblur_strength=getattr(args, "vsr_strength", 0.0) or getattr(args, "rtx_deblur_strength", 1.0),
+            upscale_strength=getattr(args, "vsr_strength", 0.0) or getattr(args, "rtx_upscale_strength", 1.0),
+            device_index=args.pytorch_gpu_id,
+        )
+        # The pipeline runs its whole chain (denoise -> deblur -> upscale) in
+        # one process() call, so it docks at exactly one stage: as the
+        # upscaler when RTX upscale is active (chain runs in upscale()), as
+        # the restorer when only denoise/deblur are active (chain runs in
+        # restore()). Docking at both would run denoise/deblur twice.
+        if rtx_upscale_mode != "Off":
+            vfx_upscaler = vfx_pipeline_obj
+            if args.upscale_model:
+                log("WARN", "RTX VFX upscale selected; ignoring the AI upscale model")
+                args.upscale_model = ""
+        elif getattr(args, "denoise", False) or getattr(args, "deblur", False):
+            restorer = vfx_pipeline_obj
+        log("ENGINE", "NVIDIA RTX VFX effects enabled",
+            detail=f"denoise={args.denoise if hasattr(args, 'denoise') else False}/{getattr(args, 'denoise_quality', 'Ultra')} "
+                   f"deblur={args.deblur if hasattr(args, 'deblur') else False}/{getattr(args, 'deblur_quality', 'Ultra')} "
+                   f"upscale={rtx_upscale_mode}/{getattr(args, 'rtx_upscale_quality', 'Ultra')} "
+                   f"strength={getattr(args, 'vsr_strength', 0.0)}")
     if args.upscale_model:
         model_path = resolve_model_path(args.upscale_model)
         log("MODEL", f"upscaler={Path(model_path).name}", detail=f"path={model_path}")
@@ -618,26 +725,28 @@ def render(args) -> None:
             detail=f"technique={upscaler.technique} mode={mode} input={compile_size[0]}x{compile_size[1]} batch={getattr(upscaler, 'batch_size', 1)} elapsed={time.monotonic() - compile_started:.1f}s")
 
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+    queue_depth = queue_size_for_frame(
+        info["width"] * info["height"] * 3, output_width * output_height * 3,
+    )
     processor = FrameProcessor(
         interpolator=interpolator, upscaler=upscaler, tile_size=tile_size,
         target_size=(output_width, output_height), to_tensor=_to_tensor, to_bgr=_to_bgr,
+        restorer=restorer, vfx_upscaler=vfx_upscaler,
     )
-    reader = RawVideoReader(args.input, width=info["width"], height=info["height"], queue_size=3)
+    reader = RawVideoReader(args.input, width=info["width"], height=info["height"], queue_size=queue_depth, duration=duration)
     writer = RawVideoWriter(encode_command(
         args.input, args.output, width=output_width, height=output_height, fps=output_fps,
         video_args=encoder_args(args.video_encoder_preset, args.crf, args.video_pixel_format),
         audio_args=audio_args(args.audio_encoder_preset, args.audio_bitrate),
         subtitle_args=subtitle_args(args.subtitle_encoder_preset),
-    ), queue_size=3)
-    estimated_count = max(1, int(math.floor(info["duration"] * output_fps + 1e-6)))
+        duration=duration,
+    ), queue_size=queue_depth)
+    estimated_count = frame_total(duration or info["duration"], output_fps)
+    render_progress.total = estimated_count
     log("PIPE", f"streaming output_frames≈{estimated_count} target_fps={output_fps:.6g}",
-        detail=f"decode=FFmpeg rawvideo queue=3 AI=fused encode={resolved_codec} queue=3 no_PNG_intermediates")
-    started = time.monotonic()
-    def progress(done: int) -> None:
-        if done == 1 or done % 10 == 0:
-            elapsed = max(time.monotonic() - started, 1e-6)
-            log("PIPE", f"processed {done}/{estimated_count} frames",
-                detail=f"throughput={done / elapsed:.2f} fps")
+        detail=f"decode=FFmpeg rawvideo queue={queue_depth} AI=fused encode={resolved_codec} queue={queue_depth} no_PNG_intermediates")
+    render_progress.rendering()
+    progress = render_progress.update
     preview_count = 0
     def preview(frame) -> None:
         nonlocal preview_count
@@ -650,13 +759,17 @@ def render(args) -> None:
         count = stream_frames(
             reader, writer, processor, source_fps=info["fps"], target_fps=output_fps,
             progress_cb=progress, preview_cb=preview,
+            duration=duration, preserve_duration=bool(duration),
         )
+        render_progress.finalizing(count)
         writer.finish()
     finally:
         reader.close()
         writer.close()
         if upscaler is not None:
             upscaler.close()
+        if vfx_pipeline_obj is not None:
+            vfx_pipeline_obj.close()
     log("DONE", f"output={args.output}",
         detail=f"frames={count} resolution={output_width}x{output_height} streaming=true")
     print(json.dumps({"status": "success", "output": args.output, "target_fps": output_fps, "frames": count, "width": output_width, "height": output_height}))
@@ -673,14 +786,29 @@ def print_backends() -> None:
         ("OpenCV", cv2 is not None),
         ("FFmpeg", shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None),
     ]
+    try:
+        import rtx_vfx
+        nvvfx_ok = rtx_vfx.nvvfx_available()
+    except Exception:
+        nvvfx_ok = False
+    checks.append(("NVIDIA RTX VFX (nvvfx)", nvvfx_ok))
     for name, ok in checks:
         print(f"[{'OK' if ok else 'XX'}] {name}")
 
 
+def parse_bool(value):
+    if value.lower() not in ("true", "false"):
+        raise argparse.ArgumentTypeError("expected true or false")
+    return value.lower() == "true"
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="DaSiWa TrueVideoEnhancer RIFE backend")
+    parser = argparse.ArgumentParser(description="DaSiWa TrueVideoEnhancer RIFE backend", allow_abbrev=False)
     parser.add_argument("--version", action="store_true")
     parser.add_argument("--list-backends", action="store_true")
+    parser.add_argument("--vfx-capabilities", action="store_true")
+    parser.add_argument("--render-capabilities", action="store_true")
+    parser.add_argument("--preview_seconds", type=float, default=0.0)
     parser.add_argument("--input")
     parser.add_argument("--output")
     parser.add_argument("--backend", choices=["pytorch", "tensorrt", "onnxruntime"], default="tensorrt")
@@ -715,12 +843,48 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", default="auto")
     parser.add_argument("--pytorch_gpu_id", type=int, default=0)
     parser.add_argument("--ncnn_gpu_id", type=int, default=0)
+    parser.add_argument("--pipeline", default="upscale", choices=["upscale", "restore", "restore+upscale", "nvidia-vfx"],
+                        help="restore = AI denoise/restoration only: no scale, no upscale model required")
+    parser.add_argument('--processing_mode', choices=['legacy', 'custom'], default='legacy')
+    parser.add_argument('--spatial_backend', choices=['none', 'ai', 'nvidia'], default='none')
+    parser.add_argument('--temporal_backend', choices=['none', 'rife', 'nvidia'], default='none')
+    parser.add_argument("--denoise", action="store_true",
+                        help="NVIDIA RTX VFX denoise pass at source resolution (requires nvvfx)")
+    parser.add_argument("--denoise_quality", default="Ultra", choices=["Low", "Medium", "High", "Ultra"])
+    parser.add_argument("--deblur", action="store_true",
+                        help="NVIDIA RTX VFX deblur pass at source resolution (requires nvvfx)")
+    parser.add_argument("--deblur_quality", default="Ultra", choices=["Low", "Medium", "High", "Ultra"])
+    parser.add_argument("--rtx_upscale", default="Off",
+                        choices=["Off", "VSR", "High Bitrate", "Streaming Medium", "Streaming Ultra"],
+                        help="NVIDIA RTX VFX upscale mode; replaces the AI model upscale path")
+    parser.add_argument("--rtx_upscale_quality", default="Ultra", choices=["Low", "Medium", "High", "Ultra"])
+    parser.add_argument("--vsr_strength", type=float, default=0.0,
+                        help="Continuous RTX VFX strength 0.0-1.0 (VFX SDK 1.3); 0 keeps the model default")
+    parser.add_argument("--rtx_frame_generation", action="store_true")
+    parser.add_argument("--rtx_fg_mode", choices=["LOW", "MEDIUM", "HIGH"], default="MEDIUM")
+    parser.add_argument("--rtx_auto_shot_detection", type=parse_bool, default=True)
+    parser.add_argument("--rtx_shot_change", action="store_true")
+    parser.add_argument("--rtx_image_encoding", choices=["rgb8", "rgb10a2"], default="rgb8")
+    for name in ("denoise", "deblur", "upscale"):
+        parser.add_argument(f"--rtx_{name}_strength", type=float, default=1.0)
+    parser.add_argument("--rtx_hdr", action="store_true")
+    for name, value in (("contrast", 100), ("saturation", 100), ("middle_gray", 50), ("luminance", 650)):
+        parser.add_argument(f"--rtx_hdr_{name}", type=float, default=value)
+    parser.add_argument("--rtx_hdr_debanding", type=parse_bool, default=True)
     return parser
 
 
 def main(argv: Iterable[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.render_capabilities:
+        from render_contract import render_capabilities
+        print(json.dumps(render_capabilities(available_ffmpeg_encoders())))
+        return 0
+    if args.vfx_capabilities:
+        from rtx_vfx import capabilities
+        print(json.dumps(capabilities()))
+        return 0
     if args.version:
         print(VERSION)
         return 0
@@ -729,8 +893,26 @@ def main(argv: Iterable[str] | None = None) -> int:
         return 0
     if not args.input or not args.output:
         parser.error("--input and --output are required")
-    if Path(args.output).exists() and not args.overwrite:
-        raise RuntimeError(f"output exists (use --overwrite): {args.output}")
+    from render_contract import validate_preview_seconds, preview_output_path
+    validate_preview_seconds(args.preview_seconds)
+    if args.start_time or args.end_time:
+        parser.error('start_time/end_time are unsupported; preview uses the first --preview_seconds seconds')
+    args.output = preview_output_path(args.output, args.preview_seconds)
+    from render_contract import validate_output_path
+    validate_output_path(args.input, args.output, args.overwrite)
+    print(f"<OUTPUT_PATH>{args.output}", file=sys.stderr, flush=True)
+
+    from rtx_vfx import validate_options
+    validate_options(vars(args))
+    if not math.isfinite(args.target_fps) or args.target_fps < 0:
+        parser.error("target_fps must be finite and nonnegative")
+    if args.scale < 1 or args.override_upscale_scale < 0:
+        parser.error("scale must be positive and override_upscale_scale nonnegative")
+    if args.processing_mode == 'custom':
+        from custom_pipeline import validate_selection
+        validate_selection(args)
+    if args.processing_mode != 'custom' and args.pipeline != "nvidia-vfx" and (args.rtx_frame_generation or args.rtx_hdr or args.rtx_image_encoding != "rgb8"):
+        parser.error("RTX frame generation, RGB10A2 and TrueHDR require --pipeline nvidia-vfx")
     render(args)
     return 0
 
