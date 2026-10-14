@@ -11,6 +11,24 @@ const models=[{id:'mixed-2x',name:'Mixed 2x',file:'mixed-2x.safetensors',categor
 {id:'rife-general',name:'RIFE general',category:'interpolation',present:true,destination:'/models/rife.safetensors'}];
 const probe={input_path:'/video/a.mp4',width:640,height:360,r_frame_rate:'24000/1001',duration:8,codec_name:'h264'};
 const s=overrides=>({...T.defaults,...overrides});
+for(const [internal,final] of [[2,1],[4,1],[4,2]])for(const filter of ['area','lanczos','bicubic']) {
+ const settings=s({spatialBackend:'nvidia',rtxUpscaleIntermediate:internal,rtxDownsampleFilter:filter,scale:final,targetFps:0});
+ const r=T.request(settings,probe,caps,models,'/video/a.mp4');
+ assert.equal(r.spatial_backend,'nvidia');assert.equal(r.rtx_upscale_intermediate,internal);assert.equal(r.rtx_downsample_filter,filter);
+ assert.equal(T.goal(settings,'scale',1).spatialBackend,'nvidia');
+ assert.match(T.stages(settings,probe,models).join(' → '),new RegExp(`NVIDIA Upscale .*${internal}x source, internal.*Downsample.*${filter}.*final ${final}x`));
+ assert.equal(T.migrate(JSON.parse(JSON.stringify(settings))).rtxUpscaleIntermediate,internal);
+}
+for(const spatial of ['ai','none']) {
+ const r=T.request(s({spatialBackend:spatial,scale:spatial==='ai'?2:1,targetFps:0,rtxUpscaleIntermediate:4,rtxDownsampleFilter:'lanczos'}),probe,caps,models,'in');
+ assert.equal(r.rtx_upscale_intermediate,0);assert.equal(r.rtx_downsample_filter,'');
+}
+for(const change of [{rtxUpscaleIntermediate:2,scale:2},{rtxUpscaleIntermediate:4,scale:4},{rtxUpscaleIntermediate:3},{rtxUpscaleIntermediate:NaN},{rtxDownsampleFilter:'nearest'}]) {
+ assert.throws(()=>T.request(s({spatialBackend:'nvidia',rtxUpscaleIntermediate:4,scale:2,...change}),probe,caps,models,'in'),/Internal NVIDIA|downsampling/);
+}
+assert.equal(T.normalize(s({spatialBackend:'ai',scale:1,rtxUpscaleIntermediate:4})).spatialBackend,'none');
+assert.equal(T.normalize(s({spatialBackend:'nvidia',scale:1,rtxUpscaleIntermediate:0})).spatialBackend,'none');
+
 const req=(overrides={},p=probe,c=caps)=>T.request(s(overrides),p,c,models,'/video/a.mp4');
 assert.equal(req().processing_mode,'custom');assert.equal(req().pipeline,'upscale');assert.equal(req().spatial_backend,'ai');assert.equal(req().temporal_backend,'rife');
 assert.equal(req().upscale_model,'/models/mixed2.safetensors');

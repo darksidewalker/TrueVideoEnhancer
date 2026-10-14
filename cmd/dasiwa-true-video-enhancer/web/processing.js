@@ -5,7 +5,7 @@ const TVE = (() => {
     contentType:'mixed', outputContainer:'mp4', scale:2, targetFps:60,
     backend:'tensorrt', upscaleModel:'', rifeModel:'', videoEncoderPreset:'auto', crf:18, tileSize:0,
     denoise:false, deblur:false, denoiseQuality:'Ultra', deblurQuality:'Ultra', rtxUpscaleQuality:'Ultra',
-    rtxUpscale:'VSR', rtxFGMode:'MEDIUM', rtxAutoShotDetection:true,
+    rtxUpscale:'VSR', rtxUpscaleIntermediate:0, rtxDownsampleFilter:'area', rtxFGMode:'MEDIUM', rtxAutoShotDetection:true,
     rtxImageEncoding:'rgb8', rtxDenoiseStrength:1, rtxDeblurStrength:1, rtxUpscaleStrength:1,
     rtxHDR:false, rtxHDRContrast:100, rtxHDRSaturation:100, rtxHDRMiddleGray:50, rtxHDRLuminance:650,
     rtxHDRDebanding:true, preview:false, previewSeconds:5};
@@ -33,7 +33,7 @@ const TVE = (() => {
     const s={...defaults,...settings};
     if (!['none','ai','nvidia'].includes(s.spatialBackend)) s.spatialBackend='none';
     if (!['none','rife','nvidia'].includes(s.temporalBackend)) s.temporalBackend='none';
-    if (Number(s.scale)===1) s.spatialBackend='none';
+    if (Number(s.scale)===1 && !(s.spatialBackend==='nvidia' && Number(s.rtxUpscaleIntermediate)>0)) s.spatialBackend='none';
     if (Number(s.targetFps)===0) s.temporalBackend='none';
     if (s.spatialBackend!=='none') s.lastSpatialBackend=s.spatialBackend;
     if (s.temporalBackend!=='none') s.lastTemporalBackend=s.temporalBackend;
@@ -43,7 +43,7 @@ const TVE = (() => {
   }
   function goal(settings,key,value) {
     const s={...settings,[key]:value};
-    if (key==='scale') s.spatialBackend=Number(value)===1?'none':settings.spatialBackend!=='none'?settings.spatialBackend:settings.lastSpatialBackend||'ai';
+    if (key==='scale') s.spatialBackend=Number(value)===1 && !(settings.spatialBackend==='nvidia' && Number(settings.rtxUpscaleIntermediate)>0)?'none':settings.spatialBackend!=='none'?settings.spatialBackend:settings.lastSpatialBackend||'ai';
     if (key==='targetFps') s.temporalBackend=Number(value)===0?'none':settings.temporalBackend!=='none'?settings.temporalBackend:settings.lastTemporalBackend||'rife';
     return normalize(s);
   }
@@ -53,7 +53,7 @@ const TVE = (() => {
     if (spatial[feature]) {
       const selected=spatial[feature]; s.lastSpatialBackend=selected;
       if (s.spatialBackend===selected) { s.spatialBackend='none'; s.scale=1; }
-      else { s.spatialBackend=selected; if (!(Number(s.scale)>1)) s.scale=2; }
+      else { s.spatialBackend=selected; if (!(Number(s.scale)>1) && !(selected==='nvidia' && Number(s.rtxUpscaleIntermediate)>0)) s.scale=2; }
     } else if (temporal[feature]) {
       const selected=temporal[feature]; s.lastTemporalBackend=selected;
       if (s.temporalBackend===selected) { s.temporalBackend='none'; s.targetFps=0; }
@@ -118,6 +118,13 @@ const TVE = (() => {
     if (Number(s.targetFps)>0 && Number(s.targetFps)<sourceFPS(p)-1e-6) errors.push('Interpolation cannot reduce source FPS. Use 0 to preserve source cadence.');
     if (!Number.isFinite(Number(s.crf)) || Number(s.crf)<0 || Number(s.crf)>51) errors.push('CRF / CQ must be between 0 and 51.');
     if ((s.spatialBackend==='ai'||s.temporalBackend==='rife') && (!Number.isFinite(Number(s.tileSize)) || Number(s.tileSize)<0)) errors.push('Tile size must be non-negative.');
+    if (s.spatialBackend==='nvidia') {
+      if (![0,2,4].includes(Number(s.rtxUpscaleIntermediate))) errors.push('Internal NVIDIA upscale must be Off, 2× or 4×.');
+      if (Number(s.rtxUpscaleIntermediate)>0) {
+        if (Number(s.rtxUpscaleIntermediate)<=Number(s.scale)) errors.push('Internal NVIDIA upscale must exceed final output scale.');
+        if (!['area','lanczos','bicubic'].includes(s.rtxDownsampleFilter)) errors.push('Choose Area, Lanczos or Bicubic downsampling.');
+      }
+    }
     if (Number(s.scale)>1 && s.spatialBackend==='none') errors.push('Select an upscale feature for the output scale.');
     if (increased(s,p) && s.temporalBackend==='none') errors.push('Select an interpolation feature for the target FPS.');
     if (s.spatialBackend==='ai' && (!model('upscaler',s,models) || scaleOf(model('upscaler',s,models))!==Number(s.scale))) errors.push('Choose or download a matching content / scale model in Models.');
@@ -149,7 +156,9 @@ const TVE = (() => {
     if (s.deblur) result.push('NVIDIA Deblur');
     if (s.spatialBackend!=='none') {
       const m=s.spatialBackend==='ai'?model('upscaler',s,models):null;
-      result.push(`${s.spatialBackend==='ai'?'AI Upscale':'NVIDIA Upscale'} (${s.scale}x${m?', '+m.name:''})`);
+      const intermediate=s.spatialBackend==='nvidia' && Number(s.rtxUpscaleIntermediate)>0;
+      result.push(`${s.spatialBackend==='ai'?'AI Upscale':'NVIDIA Upscale'} (${intermediate?s.rtxUpscaleIntermediate+'x source, internal':s.scale+'x'}${m?', '+m.name:''})`);
+      if (intermediate) result.push(`Downsample (${s.rtxDownsampleFilter} → final ${s.scale}x)`);
     }
     if (s.temporalBackend!=='none' && increased(s,p)) {
       const m=s.temporalBackend==='rife'?model('interpolation',s,models):null;
@@ -175,6 +184,8 @@ const TVE = (() => {
       scene_detect_method:s.temporalBackend==='rife'?'pyscenedetect':'none',scene_detect_threshold:s.temporalBackend==='rife'?4:0,tile_size:ai?Number(s.tileSize):0,
       denoise:!!s.denoise,deblur:!!s.deblur,denoise_quality:s.denoiseQuality,deblur_quality:s.deblurQuality,
       rtx_upscale:s.spatialBackend==='nvidia'?s.rtxUpscale:'Off',rtx_upscale_quality:s.rtxUpscaleQuality,vsr_strength:0,hdr_mode:false,
+      rtx_upscale_intermediate:s.spatialBackend==='nvidia'?Number(s.rtxUpscaleIntermediate):0,
+      rtx_downsample_filter:s.spatialBackend==='nvidia' && Number(s.rtxUpscaleIntermediate)>0?s.rtxDownsampleFilter:'',
       rtx_frame_generation:s.temporalBackend==='nvidia' && increased(s,p),rtx_fg_mode:s.rtxFGMode,
       rtx_auto_shot_detection:!!s.rtxAutoShotDetection,rtx_shot_change:false,rtx_image_encoding:sdk?s.rtxImageEncoding:'rgb8',
       rtx_denoise_strength:caps.vfx?.strength?Number(s.rtxDenoiseStrength):1,rtx_deblur_strength:caps.vfx?.strength?Number(s.rtxDeblurStrength):1,rtx_upscale_strength:caps.vfx?.strength?Number(s.rtxUpscaleStrength):1,

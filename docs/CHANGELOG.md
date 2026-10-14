@@ -4,6 +4,14 @@ All notable changes to DaSiWa True Video Enhancer are recorded in this file.
 The project has no release tags; entries are grouped by date. The most recent
 entries are at the top.
 
+## 2026-10-14 — NVIDIA internal upscale and downsample (`2026.10.14-nvidia-refine`)
+
+- Added opt-in source-relative internal NVIDIA 2× / 4× with separate final output scale (including 1×). Default Off preserves the existing path; Area is the downsample default, with Lanczos and Bicubic choices.
+- Persisted studio controls and one canonical single/batch request; Source plan names internal scale, reduction filter and final scale. No inactive setting leaks to AI/legacy backends.
+- Added early API/CLI cross-field validation and intermediate 8K/host-memory guards. Downsample occurs once before temporal interpolation and HDR, retaining uint8/uint16 storage and final encoder dimensions; no extra encode or frame staging.
+- Added frontend/browser, Go argv/JSON and CPU pipeline regressions. Real two-frame NVIDIA SDK renders verified 2×→1× Area and 4×→2× Lanczos / 4×→1× Bicubic, including actual FFV1 8/10-bit outputs and staging cleanup.
+- Rebuilt Linux amd64 and Windows amd64/arm64 binaries directly with the feature version; running services remain untouched. Windows inference is not established by cross-compilation.
+
 ## 2026-10-11 — Processed preview fidelity fix
 
 - Removed the completed-preview reduction to 480 pixels and 12 FPS; browser proxies retain output resolution/cadence and use H.264 CRF 18. Versioned cache paths and URLs bypass older low-quality copies.

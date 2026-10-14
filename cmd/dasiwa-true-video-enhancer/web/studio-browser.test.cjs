@@ -85,6 +85,14 @@ const server=http.createServer((req,res)=>{
  await page.locator('#targetFps').fill('60');assert.equal(await page.locator('#rifeInterpolation').getAttribute('aria-pressed'),'true');
  await page.locator('#nvidiaUpscale').click();await page.locator('#nvidiaFrameGeneration').click();
  if(process.env.TVE_BROWSER_MEDIA){await page.waitForFunction(()=>document.querySelector('#videoPreview').readyState>=2);await page.locator('#videoPreview').evaluate(video=>video.currentTime=0.5);await page.waitForFunction(()=>!document.querySelector('#videoPreview').seeking && document.querySelector('#videoPreview').readyState>=2);}
+ await page.locator('#rtxUpscaleIntermediate').selectOption('4');
+ await page.locator('#rtxDownsampleFilter').selectOption('lanczos');
+ await page.locator('#scale').selectOption('1');
+ assert.equal(await page.locator('#nvidiaUpscale').getAttribute('aria-pressed'),'true');
+ assert.match(await page.locator('#pipelinePlan').innerText(),/4x source, internal.*Downsample.*lanczos.*final 1x/);
+ await page.locator('#scale').selectOption('4');
+ assert.equal(await page.locator('#runJob').isDisabled(),true);
+ await page.locator('#scale').selectOption('2');
  const output=process.env.TVE_SCREENSHOT_DIR||process.env.TMPDIR;
  assert.ok(output,'Set TVE_SCREENSHOT_DIR or TMPDIR for screenshot artifacts');fs.mkdirSync(output,{recursive:true});
  for(const [width,height] of [[1440,900],[1920,1080],[390,844]]){
@@ -99,16 +107,19 @@ const server=http.createServer((req,res)=>{
  await page.locator('#rtxHDR').click(); await page.locator('#targetFps').fill('60');
  await page.locator('#preview').uncheck(); await page.locator('#runJob').click();
  await page.waitForFunction(()=>document.querySelectorAll('.queue-ui-job').length>=2);
+ assert.equal(requests[1].body.rtx_upscale_intermediate,4);assert.equal(requests[1].body.rtx_downsample_filter,'lanczos');
  assert.equal(requests[1].body.preview,false);assert.equal(requests[1].body.start_time,undefined);assert.equal(requests[1].body.end_time,undefined);
  await page.locator('#preview').check(); await page.locator('#openBatchDialog').click(); await page.locator('#batchFolder').fill('/video'); await page.locator('#batchFolder').press('Tab');
  await page.waitForFunction(()=>document.querySelectorAll('#batchFileList input').length===4);await page.locator('#batchEnqueue').click();
  await page.waitForFunction(()=>!document.querySelector('#batchDialog').open);
  const batch=requests.filter(r=>r.url==='/api/jobs/batch'); assert.equal(batch.length,4);
+ for(const r of batch){assert.equal(r.body.rtx_upscale_intermediate,4);assert.equal(r.body.rtx_downsample_filter,'lanczos');}
  assert.equal(batch[0].body.rtx_frame_generation,true);assert.equal(batch[1].body.rtx_frame_generation,false);
  assert.equal(batch[0].body.preview,true);assert.equal(batch[1].body.preview,true);assert.equal(batch[0].body.request,undefined);
  assert.equal(batch[2].body.output_dir,'/video/enhanced/sub/a.mp4');assert.equal(batch[3].body.output_dir,'/video/enhanced/sub/a.mkv');
  await page.reload();await page.waitForFunction(()=>document.querySelector('#runtimeSummary').textContent.includes('Python'));
  assert.equal(await page.locator('#upscaleModel').inputValue(),'mixed-2x');assert.equal(await page.locator('#rifeModel').inputValue(),'rife-general');
+ assert.equal(await page.locator('#rtxUpscaleIntermediate').inputValue(),'4');assert.equal(await page.locator('#rtxDownsampleFilter').inputValue(),'lanczos');
  assert.equal(await page.locator('#rtxDenoiseStrength').inputValue(),'0');assert.equal(await page.locator('#rtxAutoShotDetection').isChecked(),false);
  failCapabilities=true;await page.locator('#retryCapabilities').click();await page.waitForFunction(()=>document.querySelector('#requestStatus').textContent.includes('SDK discovery offline'));
  assert.equal(await page.locator('#runJob').isDisabled(),true);

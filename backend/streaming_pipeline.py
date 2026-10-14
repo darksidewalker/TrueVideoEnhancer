@@ -32,7 +32,8 @@ def available_host_memory() -> int | None:
 
 def validate_resource_budget(*, source_width: int, source_height: int,
                              output_width: int, output_height: int,
-                             available_memory: int | None = None, bytes_per_channel: int = 1) -> int:
+                             available_memory: int | None = None, bytes_per_channel: int = 1,
+                             intermediate_size: tuple[int, int] | None = None) -> int:
     """Fail before spawning ML/FFmpeg workers for a frame the host cannot safely hold.
 
     Rawvideo streaming deliberately keeps only bounded queues, but each 4x frame is
@@ -41,9 +42,13 @@ def validate_resource_budget(*, source_width: int, source_height: int,
     and stall the desktop before the kernel can reclaim memory.
     """
     output_pixels = output_width * output_height
-    if output_pixels > MAX_SAFE_OUTPUT_PIXELS:
+    if intermediate_size and intermediate_size[0] * intermediate_size[1] > output_pixels:
+        limit_width, limit_height = intermediate_size
+    else:
+        limit_width, limit_height = output_width, output_height
+    if limit_width * limit_height > MAX_SAFE_OUTPUT_PIXELS:
         raise RuntimeError(
-            f"requested {output_width}x{output_height} output exceeds the 8K safety limit "
+            f"requested {limit_width}x{limit_height} processing frame exceeds the 8K safety limit "
             f"({MAX_SAFE_OUTPUT_PIXELS:,} pixels); use a smaller scale or source resolution"
         )
     source_bytes = source_width * source_height * 3 * bytes_per_channel
@@ -51,6 +56,9 @@ def validate_resource_budget(*, source_width: int, source_height: int,
     # Reader queue, writer queue, the current processed output, and conversion
     # buffers.  This intentionally excludes GPU tensors.
     required_memory = _HOST_MEMORY_HEADROOM + source_bytes * 3 + output_bytes * 5
+    if intermediate_size:
+        # SDK output/conversion buffers plus two cached final-size endpoints.
+        required_memory += intermediate_size[0] * intermediate_size[1] * 3 * bytes_per_channel * 3 + output_bytes * 2
     if available_memory is None:
         available_memory = available_host_memory()
     if available_memory is not None and available_memory < required_memory:
@@ -213,6 +221,7 @@ class FrameProcessor:
     vfx_upscaler: VfxStage | None = None
     output_dtype: Any = np.uint8
     force_upscale: bool = False
+    vfx_target_size: tuple[int, int] | None = None
 
     def restore(self, frame: np.ndarray) -> np.ndarray:
         """Denoise/deblur at source resolution (RTX VFX, modes 8-15)."""
@@ -223,7 +232,8 @@ class FrameProcessor:
 
     def upscale(self, frame: np.ndarray) -> np.ndarray:
         if self.vfx_upscaler is not None:
-            buffer = np.zeros((self.target_size[1], self.target_size[0], 3), dtype=self.output_dtype)
+            size = self.vfx_target_size or self.target_size
+            buffer = np.zeros((size[1], size[0], 3), dtype=self.output_dtype)
             return self.vfx_upscaler.process(frame, buffer)
         if self.upscaler is None:
             return frame

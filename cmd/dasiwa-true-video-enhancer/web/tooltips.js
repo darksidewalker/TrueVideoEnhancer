@@ -4,6 +4,8 @@ const controlHelp={
   aiUpscale:'Upscale with an installed AI model. Replaces NVIDIA Upscale, without changing restoration or interpolation.',
   rifeInterpolation:'Interpolate with an installed RIFE model. Replaces NVIDIA Frame Generation.',
   nvidiaUpscale:'Upscale with the NVIDIA SDK. Replaces AI Upscale.',
+  rtxUpscaleIntermediate:'Off follows the final output scale. Internal 2× / 4× is relative to the source and must exceed final scale; downsample once before interpolation and HDR.',
+  rtxDownsampleFilter:'Area (default): quieter, strong anti-aliasing for reduction. Lanczos: sharper, may ring. Bicubic: softer compromise. No filter can guarantee a quality improvement.',
   nvidiaFrameGeneration:'Generate intermediate frames with the NVIDIA SDK. Replaces RIFE Interpolation.',
   targetFps:'0 preserves source cadence and turns off interpolation. Increasing the target restores the last chosen temporal feature.',
   contentType:'Routes AI models by content. NVIDIA SDK processing has no content-specific modes.',
@@ -14,4 +16,4 @@ const controlHelp={
   crf:'Lower values retain more detail and usually increase output size.',
   tileSize:'0 selects automatic full-frame inference with a tiled fallback. Set a non-zero tile size to override.',
 };
-for(const [id,text] of Object.entries(controlHelp)){const el=document.getElementById(id);if(el)el.title=text;}
+for(const [id,text] of Object.entries(controlHelp)){const el=document.querySelector(`[data-tooltip="${id}"]`) || document.getElementById(id);if(el)el.title=text;}

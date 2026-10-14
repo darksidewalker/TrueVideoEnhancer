@@ -13,6 +13,27 @@ Activate the individual NVIDIA feature buttons in the studio's middle Settings a
 
 Feature support depends on the installed `nvidia-vfx` binding, embedded SDK, GPU and driver. Unsupported explicit requests must produce an error rather than silently switching to another effect or lower precision. SDK availability alone is not proof that inference works on a particular device.
 
+## Internal upscale → final downsample
+
+Select **NVIDIA Upscale**, then set **Internal upscale** to **2× source** or **4× source**. Output scale remains the final encoded size: for example source → internal 2× → final 1×, or source → internal 4× → final 2×. Internal scale must be strictly larger than final scale. **Off · follow output** is the existing default; inactive preferences are retained locally but are not applied to AI or other backends.
+
+**Area** is the default downsample filter: strong anti-aliasing and quieter texture during reduction. **Lanczos** retains a sharper look but can introduce ringing/halos; **Bicubic** is a softer compromise. There is no universally optimal filter or guaranteed detail gain. Compare a short preview on the actual source. Internal 4× processes 16 times the source pixels even when exporting 1×, so it costs more time and memory without increasing final dimensions. File size still depends on codec and quality settings.
+
+The custom path is restoration → NVIDIA internal upscale → one CPU OpenCV downsample → temporal interpolation → SDR-to-HDR → final encode. No extra encode, PNG sequence or second AI pass is introduced. uint8 / uint16 storage survives the resize; interpolation/HDR/encoder only see final dimensions. Internal frames also obey the 8K pixel ceiling and a bounded host-memory budget before effect construction. These checks exclude GPU tensors and cannot guarantee VRAM fit.
+
+CLI example (new output path required):
+
+```bash
+runtime/venv/bin/python backend/rve-backend.py --input source.mp4 --output refined.mkv \
+  --processing_mode custom --spatial_backend nvidia --temporal_backend none \
+  --rtx_upscale VSR --rtx_upscale_intermediate 2 --scale 1 \
+  --rtx_downsample_filter area --video_encoder_preset ffv1
+```
+
+API fields are `rtx_upscale_intermediate: 0|2|4` and `rtx_downsample_filter: "area"|"lanczos"|"bicubic"`. With intermediate off, omit the filter (or send an empty string); a non-empty filter without intermediate, inappropriate backends, invalid enum/numeric values and internal ≤ final are rejected. Omitting the filter while intermediate is enabled uses Area. Single and flat batch requests share this contract.
+
+Run the tiny actual SDK verifier with a **new** scratch directory: `runtime/venv/bin/python tools/verify_nvidia_intermediate.py --output-dir /path/to/new-scratch-dir`. It renders all three filters with 2×→1× and 4×→1×/2×, verifies final dimensions, frame count, FFV1 codec, 8/10-bit formats and staging cleanup. It needs the installed NVIDIA SDK/GPU; ordinary tests use explicit CPU mocks.
+
 ## Encoder preflight
 
 Every offered encoder is smoke-tested before model/effect inference with one aligned 256×256 frame at 24 FPS and the production encoder profile/quality options. Strict pixel formats prevent an unsupported 10-bit request from silently becoming 8-bit. NVENC 10-bit probes use P010, software codecs use planar 10-bit, and ProRes uses 10-bit 4:2:2. The probe explicitly converts the test frame to that format, has a 20-second timeout and reports the actual FFmpeg failure details. This checks basic encoder availability, not memory requirements at the full requested resolution.

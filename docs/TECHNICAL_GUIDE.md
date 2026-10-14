@@ -59,6 +59,14 @@ Each output frame follows this order:
 
 The final Lanczos adjustment is not a replacement for a selected AI upscaler. In particular, a native 2x model at a 4x target runs twice before any final dimension adjustment.
 
+### 4.1a Custom NVIDIA internal resolution
+
+The studio custom graph differs from legacy interpolation-first processing: restoration → spatial → temporal → HDR → encode. `rtx_upscale_intermediate` defaults to `0` (follow final output); opt-in `2` / `4` refers to the **source**, not the final output. It requires custom NVIDIA spatial processing and must exceed the effective final scale (`override_upscale_scale` or `scale`). Final 1× remains an active NVIDIA spatial stage only when intermediate is enabled.
+
+`FrameProcessor.vfx_target_size` supplies the internal SDK buffer without changing `target_size`. The custom source endpoint downsamples once to `target_size` before caching its two owned endpoints; interpolation, HDR and encoder remain final-sized. `rtx_downsample_filter` maps `area` (default for the opt-in feature), `lanczos`, `bicubic` to OpenCV INTER_AREA / INTER_LANCZOS4 / INTER_CUBIC. OpenCV retains uint8/uint16 storage. Off retains legacy Lanczos exact-size adjustment and original buffer allocation; AI/native legacy pipelines do not consume intermediate preferences.
+
+The shared resource guard checks the larger of intermediate and final pixel counts against 33,177,600 pixels. Enabled intermediate processing adds three internal host buffers and two final cached endpoints to the existing source/encoder estimate; all checks precede SDK effect allocation. Logged internal/final dimensions, filter and host budget describe the actual path, not GPU memory guarantees. Request/CLI validation rejects invalid values, filters without intermediate, other backends and internal ≤ final before inference.
+
 ### 4.2 Frame interpolation
 
 Interpolation runs only if `target_fps > source_fps`. The scheduler is timestamp driven rather than fixed to 2x/30 FPS:

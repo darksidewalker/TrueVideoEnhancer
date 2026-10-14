@@ -51,6 +51,7 @@ It is designed for one video job at a time: select a local source, choose a targ
 - RIFE v4.26 frame interpolation for an arbitrary higher target FPS, including fractional conversions such as 24→60.
 - Batch folder queue: enqueue every video in a folder as sequential jobs; existing outputs are skipped so a stopped batch resumes where it ended.
 - Composable processing: AI or NVIDIA upscaling, RIFE or NVIDIA Frame Generation, optional NVIDIA denoise/deblur, and final SDR-to-HDR conversion with tagged 10-bit output.
+- Optional NVIDIA internal 2× / 4× upscale followed by one downsample to final 1× / 2×, keeping smaller output dimensions. Off preserves existing behavior; Area is the reduction default, with sharper Lanczos or softer Bicubic available. Quality improvement depends on the source, not just the filter.
 - Bounded FFmpeg rawvideo decode → AI → encode streaming. It does not write a full PNG frame sequence.
 - TensorRT acceleration for CUDA upscalers, with tiled fallback when a full-frame engine cannot compile.
 - Processed preview selected by default: native-resolution live JPEGs and completed SDR browser playback at output resolution/FPS.

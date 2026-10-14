@@ -10,7 +10,24 @@ from streaming_pipeline import FrameProcessor
 from rtx_vfx import RTXVfxPipeline, RTXFrameInterpolator, _input, _output
 
 
+def validate_intermediate(args):
+    scale = getattr(args, 'rtx_upscale_intermediate', 0)
+    filter_name = getattr(args, 'rtx_downsample_filter', '')
+    if scale not in (0, 2, 4):
+        raise ValueError('rtx_upscale_intermediate must be 0 (off), 2 or 4')
+    if filter_name not in ('', 'area', 'lanczos', 'bicubic'):
+        raise ValueError('rtx_downsample_filter must be area, lanczos or bicubic')
+    if scale:
+        if getattr(args, 'processing_mode', 'legacy') != 'custom' or args.spatial_backend != 'nvidia':
+            raise ValueError('intermediate upscale requires custom NVIDIA spatial processing')
+        if scale <= (args.override_upscale_scale or args.scale):
+            raise ValueError('intermediate upscale must exceed final output scale')
+    elif filter_name:
+        raise ValueError('rtx_downsample_filter requires intermediate upscale')
+
+
 def validate_selection(args, info=None):
+    validate_intermediate(args)
     if not math.isfinite(args.target_fps) or args.target_fps < 0:
         raise ValueError('target_fps must be finite and nonnegative')
     if args.scale < 1 or args.override_upscale_scale < 0:
@@ -51,9 +68,10 @@ def needs_nvidia(args):
 
 class ComposableProcessor:
     """Two owned source endpoints; restore/spatial once, HDR once per output."""
-    def __init__(self, spatial, interpolator, hdr, dtype):
+    def __init__(self, spatial, interpolator, hdr, dtype, downsample_filter=None):
         self.spatial, self.interpolator, self.hdr, self.dtype = spatial, interpolator, hdr, dtype
         self.cache = deque(maxlen=2)
+        self.downsample_filter = downsample_filter
 
     def endpoint(self, frame):
         for original, processed in self.cache:
@@ -62,7 +80,7 @@ class ComposableProcessor:
         processed = self.spatial.upscale(self.spatial.restore(frame))
         if (processed.shape[1], processed.shape[0]) != self.spatial.target_size:
             import cv2
-            processed = cv2.resize(processed, self.spatial.target_size, interpolation=cv2.INTER_LANCZOS4)
+            processed = cv2.resize(processed, self.spatial.target_size, interpolation=self.downsample_filter if self.downsample_filter is not None else cv2.INTER_LANCZOS4)
         processed = np.ascontiguousarray(processed)
         self.cache.append((frame, processed))
         return processed
@@ -121,7 +139,10 @@ def build_processor(args, cli, info, target, factor, dtype, resources):
     spatial = FrameProcessor(None, ai, tile, target,
                              lambda f: _input(f, 'cpu'), lambda t: _output(t, dtype),
                              restorer=restorer, vfx_upscaler=vfx, output_dtype=dtype,
-                             force_upscale=ai is not None)
+                             force_upscale=ai is not None,
+                             vfx_target_size=(info['width'] * args.rtx_upscale_intermediate,
+                                              info['height'] * args.rtx_upscale_intermediate)
+                             if getattr(args, 'rtx_upscale_intermediate', 0) else None)
     temporal = None
     if factor > 1:
         if args.temporal_backend == 'rife':
@@ -140,7 +161,12 @@ def build_processor(args, cli, info, target, factor, dtype, resources):
     )) if args.rtx_hdr else None
     cli.log('TECH', f'custom: restoration={bool(restorer)} spatial={args.spatial_backend} temporal={args.temporal_backend}/{factor:g} HDR-last={bool(hdr)}',
             detail=f'AI/RIFE normalized floating-point SDR; raw storage={np.dtype(dtype)}')
-    return ComposableProcessor(spatial, temporal, hdr, dtype)
+    downsample = None
+    if getattr(args, 'rtx_upscale_intermediate', 0):
+        import cv2
+        downsample = {'area': cv2.INTER_AREA, 'lanczos': cv2.INTER_LANCZOS4,
+                      'bicubic': cv2.INTER_CUBIC}[args.rtx_downsample_filter or 'area']
+    return ComposableProcessor(spatial, temporal, hdr, dtype, downsample)
 
 
 def close_resources(resources):

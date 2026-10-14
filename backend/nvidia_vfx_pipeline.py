@@ -196,17 +196,22 @@ def _render_nvidia(args, cli, cleanup):
         fd, encode_output = tempfile.mkstemp(prefix='.tve-render-', suffix=Path(output).suffix, dir=Path(output).parent)
         os.close(fd)
         cleanup.callback(lambda: Path(encode_output).unlink(missing_ok=True))
+    internal = (info["width"] * args.rtx_upscale_intermediate, info["height"] * args.rtx_upscale_intermediate) if custom and getattr(args, "rtx_upscale_intermediate", 0) else target
     budget = validate_resource_budget(
         source_width=info["width"],
         source_height=info["height"],
         output_width=target[0],
         output_height=target[1],
+        intermediate_size=internal if internal != target else None,
         bytes_per_channel=2 if precise else 1,
     )
     queue = queue_size_for_frame(
         info["width"] * info["height"] * (6 if precise else 3),
         target[0] * target[1] * (6 if precise else 3),
     )
+    if internal != target:
+        cli.log('RES', f'NVIDIA internal={internal[0]}x{internal[1]} final={target[0]}x{target[1]} filter={args.rtx_downsample_filter or "area"}',
+                detail=f'bounded host budget={budget} bytes (includes intermediate buffers and cached endpoints; excludes GPU tensors)')
     resources = []
     cleanup.callback(close_resources, resources)
     vfx = fg = None

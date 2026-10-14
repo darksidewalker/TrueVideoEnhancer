@@ -581,6 +581,7 @@ function syncSettings() {
   show('denoiseControls',settings.denoise); show('deblurControls',settings.deblur);
   for (const id of ['rtxDenoiseStrength','rtxDeblurStrength','rtxUpscaleStrength']) $(id).closest('label').hidden=!v.strength;
   show('sdkUpscaleControls',settings.spatialBackend==='nvidia'); show('fgControls',settings.temporalBackend==='nvidia');
+  show('downsampleControls',settings.spatialBackend==='nvidia' && Number(settings.rtxUpscaleIntermediate)>0);
   show('hdrControls',settings.rtxHDR); show('precisionNote',settings.rtxHDR||(sdk&&settings.rtxImageEncoding==='rgb10a2'));
   $('contentType').closest('label').hidden=!ai;
   $('settingsTitle').textContent='Mix & match';

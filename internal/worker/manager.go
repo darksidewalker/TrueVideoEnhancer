@@ -164,6 +164,9 @@ type Request struct {
 	RtxHDRMiddleGray      *float64 `json:"rtx_hdr_middle_gray"`
 	RtxHDRLuminance       *float64 `json:"rtx_hdr_luminance"`
 	RtxHDRDebanding       *bool    `json:"rtx_hdr_debanding"`
+
+	RtxUpscaleIntermediate int    `json:"rtx_upscale_intermediate"`
+	RtxDownsampleFilter    string `json:"rtx_downsample_filter"`
 }
 
 // BatchRequest enqueues many input videos with one shared settings template.
@@ -699,6 +702,10 @@ func advancedArgs(req Request) []string {
 	if mode := validateRtxUpscale(req.RtxUpscale); mode != "" && mode != "Off" && (req.ProcessingMode != "custom" || req.SpatialBackend == "nvidia") {
 		args = append(args, "--rtx_upscale", mode)
 		args = appendStringArg(args, "--rtx_upscale_quality", req.RtxUpscaleQuality)
+		if req.ProcessingMode == "custom" && req.RtxUpscaleIntermediate != 0 {
+			args = append(args, "--rtx_upscale_intermediate", strconv.Itoa(req.RtxUpscaleIntermediate))
+			args = appendStringArg(args, "--rtx_downsample_filter", req.RtxDownsampleFilter)
+		}
 		if req.VsrStrength > 0 && req.Pipeline != "nvidia-vfx" {
 			args = append(args, "--vsr_strength", strconv.FormatFloat(min(req.VsrStrength, 1.0), 'f', -1, 64))
 		}
@@ -837,6 +844,31 @@ func isSupportedContainer(container string) bool {
 }
 
 func validateRequest(req Request) error {
+	if req.RtxUpscaleIntermediate != 0 && req.RtxUpscaleIntermediate != 2 && req.RtxUpscaleIntermediate != 4 {
+		return errors.New("rtx_upscale_intermediate must be 0, 2 or 4")
+	}
+	switch req.RtxDownsampleFilter {
+	case "", "area", "lanczos", "bicubic":
+	default:
+		return errors.New("rtx_downsample_filter must be area, lanczos or bicubic")
+	}
+	if req.RtxUpscaleIntermediate != 0 {
+		if req.ProcessingMode != "custom" || req.SpatialBackend != "nvidia" {
+			return errors.New("intermediate upscale requires custom NVIDIA spatial processing")
+		}
+		scale := req.Scale
+		if scale == 0 {
+			scale = 1
+		}
+		if req.OverrideUpscaleScale != 0 {
+			scale = req.OverrideUpscaleScale
+		}
+		if req.RtxUpscaleIntermediate <= scale {
+			return errors.New("intermediate upscale must exceed final output scale")
+		}
+	} else if req.RtxDownsampleFilter != "" {
+		return errors.New("rtx_downsample_filter requires intermediate upscale")
+	}
 	if req.ProcessingMode != "" && req.ProcessingMode != "legacy" && req.ProcessingMode != "custom" {
 		return errors.New("processing_mode must be legacy or custom")
 	}
@@ -888,7 +920,7 @@ func validateRequest(req Request) error {
 	for _, arg := range req.ExtraArgs {
 		name := strings.SplitN(arg, "=", 2)[0]
 		switch name {
-		case "--preview_seconds", "--input", "--output", "--start_time", "--end_time", "--processing_mode", "--spatial_backend", "--temporal_backend":
+		case "--preview_seconds", "--input", "--output", "--start_time", "--end_time", "--processing_mode", "--spatial_backend", "--temporal_backend", "--rtx_upscale_intermediate", "--rtx_downsample_filter":
 			return fmt.Errorf("extra_args may not override managed flag %s", name)
 		}
 	}

@@ -583,6 +583,8 @@ def encode_video(input_video: str, output_video: str, frame_dir: Path, fps: floa
 
 
 def render(args) -> None:
+    from custom_pipeline import validate_intermediate
+    validate_intermediate(args)
     from render_contract import preview_output_path, validate_preview_seconds
     duration = validate_preview_seconds(getattr(args, 'preview_seconds', 0))
     args.output = preview_output_path(args.output, duration)
@@ -858,6 +860,10 @@ def build_parser() -> argparse.ArgumentParser:
                         choices=["Off", "VSR", "High Bitrate", "Streaming Medium", "Streaming Ultra"],
                         help="NVIDIA RTX VFX upscale mode; replaces the AI model upscale path")
     parser.add_argument("--rtx_upscale_quality", default="Ultra", choices=["Low", "Medium", "High", "Ultra"])
+    parser.add_argument('--rtx_upscale_intermediate', type=int, choices=[0, 2, 4], default=0,
+                        help='Custom NVIDIA internal scale relative to source; 0 follows final scale')
+    parser.add_argument('--rtx_downsample_filter', choices=['area', 'lanczos', 'bicubic'], default='',
+                        help='Intermediate-to-final resize filter (default area when enabled)')
     parser.add_argument("--vsr_strength", type=float, default=0.0,
                         help="Continuous RTX VFX strength 0.0-1.0 (VFX SDK 1.3); 0 keeps the model default")
     parser.add_argument("--rtx_frame_generation", action="store_true")
