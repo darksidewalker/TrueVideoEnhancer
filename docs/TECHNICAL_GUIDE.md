@@ -76,7 +76,7 @@ The current built-in interpolation model is **RIFE v4.26 General**. RIFE Heavy i
 The production loader accepts:
 
 - `.safetensors`: loaded through Spandrel; scale is taken from the model descriptor.
-- `.onnx`: executed through ONNX Runtime GPU. With TensorRT selected, the renderer confirms that `TensorrtExecutionProvider` remains active after session creation.
+- `.onnx`: with TensorRT selected, uses the installed native TensorRT ONNX parser, engine builder and CUDA runtime directly, including TensorRT 11; no ONNX Runtime TensorRT-provider ABI dependency or CUDA/CPU fallback. Other backend selections retain ONNX Runtime GPU. Native engines use a fixed batch-one NCHW RGB profile at the selected full-frame/tile size, with float16/float32 I/O as declared by ONNX. The always-on `.trt-cache` fingerprints model content (including external weights), input shape, TensorRT version, device and requested precision; writes are atomic. Static ONNX dimensions are authoritative.
 
 For Safetensors with TensorRT selected, the underlying model is compiled with Torch-TensorRT. A static full-frame engine is attempted when appropriate. On a compile failure, automatic selection falls back to tiled inference. TensorRT tile batches are padded to a static batch shape; only the original tile count is used in the reconstructed output.
 

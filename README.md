@@ -191,7 +191,7 @@ separate, always-on paths and are not affected by this variable.
 |---|:---:|---|
 | NVIDIA CUDA inference | ✅ | PyTorch CUDA; TensorRT is preferred when available. |
 | TensorRT Safetensors upscaling | ✅ | Static full-frame or tiled engine; smaller tiles are retried after compile failure. |
-| ONNX Runtime / TensorRT upscaling | ✅ | Requires TensorRT Execution Provider to activate; silent CPU fallback is rejected. |
+| Native ONNX / TensorRT upscaling | ✅ | Uses the installed TensorRT ONNX parser and runtime directly (including TensorRT 11), without ONNX Runtime's provider ABI dependency; build/inference failures do not fall back to CUDA or CPU. |
 | Safetensors upscalers | ✅ | Loaded through Spandrel; model scale is detected from the descriptor. |
 | ONNX upscalers | ✅ | Fixed-shape ONNX models run using their declared input shape. |
 | 2x and 4x output | ✅ | A native 2x model selected for 4x runs two real AI passes. |

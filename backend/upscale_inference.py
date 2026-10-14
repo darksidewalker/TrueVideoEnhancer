@@ -41,6 +41,8 @@ def tensorrt_compile_candidates(width: int, height: int, *, requested_tile: int,
                                 fixed_input_size: tuple[int, int] | None = None
                                 ) -> list[tuple[int, tuple[int, int]]]:
     if fixed_input_size is not None:
+        if fixed_input_size == (width, height) and requested_tile == 0:
+            return [(0, fixed_input_size)]
         if fixed_input_size[0] != fixed_input_size[1] or fixed_input_size[0] <= 32:
             raise ValueError(f"unsupported static ONNX input shape: {fixed_input_size}")
         return [(fixed_input_size[0] - 32, fixed_input_size)]
@@ -141,6 +143,9 @@ def create_upscaler(model_path: str | Path, *, backend: str, device: str = "auto
     if not path.is_file():
         raise FileNotFoundError(f"upscale model not found: {path}")
     if suffix == ".onnx":
+        if backend == "tensorrt":
+            from onnx_tensorrt_upscaler import TensorRTONNXUpscaler
+            return TensorRTONNXUpscaler(path, input_size=input_size, precision=precision, gpu_id=gpu_id)
         return ONNXUpscaler(path, backend=backend, gpu_id=gpu_id)
     return SafetensorsUpscaler(
         path,
@@ -162,7 +167,7 @@ def create_optimized_upscaler(model_path: str | Path, *, width: int, height: int
         candidates = tensorrt_compile_candidates(
             width, height, requested_tile=requested_tile, fixed_input_size=fixed_size,
         )
-        if requested_tile > 0 and fallback_tile_sizes:
+        if fixed_size is None and requested_tile > 0 and fallback_tile_sizes:
             candidates += [
                 (tile_size, (tile_size + 32, tile_size + 32))
                 for tile_size in fallback_tile_sizes if tile_size != requested_tile
@@ -370,27 +375,9 @@ class ONNXUpscaler:
             import onnxruntime as ort
         except ImportError as exc:
             raise RuntimeError("onnxruntime-gpu is required for ONNX upscalers") from exc
-        available = set(ort.get_available_providers())
-        if backend == "tensorrt":
-            if "TensorrtExecutionProvider" not in available:
-                raise RuntimeError("ONNX Runtime TensorRT execution provider is unavailable")
-            providers = [
-                ("TensorrtExecutionProvider", {
-                    "device_id": gpu_id,
-                    "trt_engine_cache_enable": True,
-                    "trt_engine_cache_path": str(model_path.parent / ".trt-cache"),
-                    "trt_fp16_enable": True,
-                }),
-                ("CUDAExecutionProvider", {"device_id": gpu_id}),
-                "CPUExecutionProvider",
-            ]
-            self.technique = "ONNX + TensorRT"
-        else:
-            providers = [("CUDAExecutionProvider", {"device_id": gpu_id}), "CPUExecutionProvider"]
-            self.technique = "ONNX Runtime"
+        providers = [("CUDAExecutionProvider", {"device_id": gpu_id}), "CPUExecutionProvider"]
+        self.technique = "ONNX Runtime"
         self.session = ort.InferenceSession(str(model_path), providers=providers)
-        if backend == "tensorrt" and "TensorrtExecutionProvider" not in self.session.get_providers():
-            raise RuntimeError("ONNX Runtime failed to activate the TensorRT execution provider")
         self.input_name = self.session.get_inputs()[0].name
         self.input_type = self.session.get_inputs()[0].type
         self.scale = self._detect_scale()
@@ -407,9 +394,6 @@ class ONNXUpscaler:
         for root in site.getsitepackages():
             base = Path(root)
             libraries = [
-                base / "tensorrt_libs" / "libnvinfer.so.10",
-                base / "tensorrt_libs" / "libnvonnxparser.so.10",
-                base / "tensorrt_libs" / "libnvinfer_plugin.so.10",
                 base / "nvidia" / "cudnn" / "lib" / "libcudnn.so.9",
             ]
             for library in libraries:
